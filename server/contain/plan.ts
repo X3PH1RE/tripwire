@@ -1,6 +1,6 @@
 import type { ContainStep, Finding, GraphEdge, GraphNode } from "../../shared/types";
 import { blastHops } from "../graph";
-import { awsSecretFor } from "../real/verify";
+import { awsSecretFor, VERIFIABLE } from "../real/verify";
 import { guideFor, REVOKERS } from "./providers";
 
 type Sensitivity = NonNullable<GraphNode["sensitivity"]>;
@@ -49,7 +49,9 @@ export function buildPlan(report: { findings: Finding[]; nodes: GraphNode[]; edg
         ? "Confirmed live, but Tripwire cannot revoke this provider's keys for you."
         : f.verify?.status === "unverified"
           ? "The provider could not confirm this key. Treat it as live until you have checked."
-          : "Not checked against the provider (scan with key verification to confirm it is live).";
+          : VERIFIABLE.has(f.provider)
+            ? "Not checked against the provider (scan with key verification to confirm it is live)."
+            : "Tripwire cannot check this kind of key against a provider, so it cannot tell whether it is live. Assume it is.";
     steps.push({
       live,
       rank: reach.rank,

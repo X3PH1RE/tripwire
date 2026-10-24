@@ -89,7 +89,7 @@ export async function main(argv: string[], log: (s: string) => void = (s) => pro
   const markdown = toMarkdown(report, verdict);
 
   if (values.json === "-") log(JSON.stringify(report, null, 2) + "\n");
-  else log(toText(report, verdict, !!process.stdout.isTTY && !process.env.NO_COLOR));
+  else log(toText(report, verdict, (!!process.stdout.isTTY || !!process.env.FORCE_COLOR) && !process.env.NO_COLOR));
   if (values.json && values.json !== "-") writeFileSync(values.json, JSON.stringify(report, null, 2));
   if (values.markdown) writeFileSync(values.markdown, markdown);
   if (values.github) for (const line of githubReport(report, verdict, markdown)) log(line + "\n");

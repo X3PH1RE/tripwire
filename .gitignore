@@ -6,3 +6,6 @@ runtime/
 bench/.cache/
 bench/out/
 .playwright-mcp/
+
+# Recorded demo video is large; it is attached to the GitHub release instead (npm run demo:record regenerates it).
+docs/demo/*.webm

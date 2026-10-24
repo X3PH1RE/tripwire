@@ -39,7 +39,7 @@ export async function contain(target: string, apply: boolean, json: boolean, log
   const report = await scanTarget(target, { vulns: false, verify: true, baseline: false, onValues: (v) => (values = v) }, (stage) => !quiet && err(`tripwire: ${stage}…\n`));
   const outcome = await runContain({ findings: report.findings, nodes: report.nodes, edges: report.edges, values }, { apply });
   if (json) log(JSON.stringify({ target: report.target, apply, ...outcome }, null, 2) + "\n");
-  else log(formatContain(outcome, report.findings, apply, !!process.stdout.isTTY && !process.env.NO_COLOR));
+  else log(formatContain(outcome, report.findings, apply, (!!process.stdout.isTTY || !!process.env.FORCE_COLOR) && !process.env.NO_COLOR));
   if (!apply) return 0;
   const byId = new Map(report.findings.map((f) => [f.id, f]));
   const stillExposed = outcome.results.some((r) => r.status === "failed" || r.status === "still-live" || (r.status === "guided" && byId.get(r.findingId)?.verify?.status === "live"));

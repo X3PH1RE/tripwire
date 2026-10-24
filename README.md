@@ -6,6 +6,51 @@ A repo security agent with a visual attack graph. It scans a repo for secrets, m
 
 All credentials in the demo world are fake (`tw_fake_<provider>_<random>`).
 
+## See it working
+
+Recorded end to end on a real public repository, [OWASP/NodeGoat](https://github.com/OWASP/NodeGoat) (an intentionally vulnerable demo app), by driving the actual app with Playwright. Re-record everything with `npm run dev` in one terminal and `npm run demo:record` in another; it writes to [docs/demo/](docs/demo).
+
+![Tripwire tour](docs/demo/tripwire-demo.gif)
+
+[Download the full-length video (WebM, 25 MB)](https://github.com/X3PH1RE/tripwire/releases/download/v1.0.1/tripwire-tour.webm)
+
+### Scan a real repository
+
+Paste a GitHub URL, tick **Check if keys are live**, and scan. Everything on this page except the "Live demo" section below is real output from NodeGoat.
+
+| | |
+| --- | --- |
+| ![Scan form](docs/demo/screenshots/08-scan-a-repo.png)<br>**1. Point it at a repo.** URL or `owner/name`, optionally checking each found key with its provider. | ![Progress](docs/demo/screenshots/09-scan-progress.png)<br>**2. Clone, scan files and history, look up dependencies.** Private repos use `GITHUB_TOKEN` or your `gh` login. |
+| ![Results](docs/demo/screenshots/10-scan-results.png)<br>**3. Results.** 2 secrets and 131 vulnerable dependencies (OSV.dev), with the attack graph of what each secret unlocks. | ![Blast radius](docs/demo/screenshots/11-finding-blast-radius.png)<br>**4. Click a secret** to trace its blast radius. |
+
+| | |
+| --- | --- |
+| ![Secrets found](docs/demo/screenshots/12-secrets-found.png)<br>**Secrets found.** Masked previews, file and line, rule, and a confidence badge. | ![Vulnerable dependencies](docs/demo/screenshots/15-vulnerable-dependencies.png)<br>**Vulnerable dependencies**, with the fixed version and a one-click fix PR for GitHub repos. |
+| ![Containment plan](docs/demo/screenshots/13-containment-plan.png)<br>**Containment plan**, ordered by what each key can reach. Nothing is revoked until you confirm. | ![Runbook](docs/demo/screenshots/14-containment-runbook.png)<br>**Runbook** for keys Tripwire cannot revoke by API: dashboard link and ordered steps. |
+
+NodeGoat's keys are not live, so there is nothing to revoke here and the plan shows the manual route. Automatic revocation (GitHub, Slack, GitLab, AWS) is covered by tests against stubbed provider responses, not shown on a live key.
+
+### Live demo: a simulated incident
+
+The **Live demo** tab plays a breach against a fake company (`acme-shop`, all credentials fake). It is a simulation by design; the zero-day step replays instead of opening a pull request unless `GITHUB_TOKEN` is set.
+
+| | |
+| --- | --- |
+| ![Attack graph](docs/demo/screenshots/01-demo-attack-graph.png)<br>**Attack graph** of services, secrets and what they unlock. | ![Blast radius](docs/demo/screenshots/02-blast-radius.png)<br>**Blast radius** of one leaked database URL, hop by hop, to production. |
+| ![Breach](docs/demo/screenshots/03-provider-breach.png)<br>**Provider breach.** Every secret hosted there turns red and the exposure spreads. | ![Honey secrets](docs/demo/screenshots/04-honey-secrets-planted.png)<br>**Honey secrets** planted as tripwires next to the real ones. |
+| ![Tripwire alert](docs/demo/screenshots/05-tripwire-alert.png)<br>**A decoy is used.** The alert names the file, and the real secrets beside it jump in risk. | ![Contained](docs/demo/screenshots/06-contained.png)<br>**Contain.** Rotated highest risk first, with before and after values and a timer. |
+| ![CVE patch](docs/demo/screenshots/07-cve-patch.png)<br>**New CVE.** The affected service is found and a patch is prepared. | |
+
+### Command line
+
+Rendered from the real output of the commands shown, on the same repository.
+
+| | |
+| --- | --- |
+| ![scan](docs/demo/screenshots/cli-2-scan.png)<br>**`tripwire scan`**: secrets, what they unlock, vulnerable dependencies, and a pass/fail exit code for CI. | ![contain](docs/demo/screenshots/cli-3-contain-dry-run.png)<br>**`tripwire contain`**: a dry-run plan; add `--apply` to revoke what can be revoked. |
+| ![pre-commit](docs/demo/screenshots/cli-5-pre-commit.png)<br>**Pre-commit hook.** A real `git commit` is refused while it adds a key, and passes once the key is gone. | ![baseline](docs/demo/screenshots/cli-4-baseline.png)<br>**`tripwire baseline`** accepts existing findings (as hashes) so only new secrets fail. |
+| ![benchmark](docs/demo/screenshots/cli-6-benchmark.png)<br>**`npm run bench`**: precision and recall on the labeled corpus, next to Gitleaks. | ![help](docs/demo/screenshots/cli-1-help.png)<br>**`tripwire --help`**. |
+
 ## Run
 
 ```bash

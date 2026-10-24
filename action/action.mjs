@@ -4301,7 +4301,7 @@ function buildPlan(report) {
     const reach2 = reachOf(f, nodes, edges);
     const auto2 = live2 && !!REVOKERS[f.provider];
     const guide = guideFor(f.provider);
-    const reason = auto2 ? void 0 : live2 ? "Confirmed live, but Tripwire cannot revoke this provider's keys for you." : f.verify?.status === "unverified" ? "The provider could not confirm this key. Treat it as live until you have checked." : "Not checked against the provider (scan with key verification to confirm it is live).";
+    const reason = auto2 ? void 0 : live2 ? "Confirmed live, but Tripwire cannot revoke this provider's keys for you." : f.verify?.status === "unverified" ? "The provider could not confirm this key. Treat it as live until you have checked." : VERIFIABLE.has(f.provider) ? "Not checked against the provider (scan with key verification to confirm it is live)." : "Tripwire cannot check this kind of key against a provider, so it cannot tell whether it is live. Assume it is.";
     steps.push({
       live: live2,
       rank: reach2.rank,
@@ -4409,7 +4409,7 @@ async function contain(target, apply, json2, log, err, quiet) {
 `));
   const outcome = await runContain({ findings: report.findings, nodes: report.nodes, edges: report.edges, values }, { apply });
   if (json2) log(JSON.stringify({ target: report.target, apply, ...outcome }, null, 2) + "\n");
-  else log(formatContain(outcome, report.findings, apply, !!process.stdout.isTTY && !process.env.NO_COLOR));
+  else log(formatContain(outcome, report.findings, apply, (!!process.stdout.isTTY || !!process.env.FORCE_COLOR) && !process.env.NO_COLOR));
   if (!apply) return 0;
   const byId = new Map(report.findings.map((f) => [f.id, f]));
   const stillExposed = outcome.results.some((r) => r.status === "failed" || r.status === "still-live" || r.status === "guided" && byId.get(r.findingId)?.verify?.status === "live");
@@ -4666,7 +4666,7 @@ ${HELP}`), 2;
   const verdict = evaluate(report, { secrets: !values["no-fail-secrets"], vulns: failVulns === "NONE" ? "none" : failVulns, minConfidence });
   const markdown = toMarkdown(report, verdict);
   if (values.json === "-") log(JSON.stringify(report, null, 2) + "\n");
-  else log(toText(report, verdict, !!process.stdout.isTTY && !process.env.NO_COLOR));
+  else log(toText(report, verdict, (!!process.stdout.isTTY || !!process.env.FORCE_COLOR) && !process.env.NO_COLOR));
   if (values.json && values.json !== "-") writeFileSync4(values.json, JSON.stringify(report, null, 2));
   if (values.markdown) writeFileSync4(values.markdown, markdown);
   if (values.github) for (const line of githubReport(report, verdict, markdown)) log(line + "\n");

@@ -51,11 +51,15 @@
     "import:gitleaks": "tsx scripts/import-gitleaks.mts",
     "bench": "tsx bench/run.mts",
     "bench:fetch": "tsx bench/fetch-gitleaks.mts",
-    "prepack": "npm run build:cli"
+    "prepack": "npm run build:cli",
+    "demo:record": "tsx scripts/record-demo.mts"
   },
   "devDependencies": {
     "concurrently": "^9.2.5",
     "esbuild": "^0.28.2",
+    "gifenc": "^1.0.3",
+    "playwright-core": "^1.64.1",
+    "pngjs": "^7.0.0",
     "smol-toml": "^1.9.1",
     "tsx": "^4.23.15"
   }
