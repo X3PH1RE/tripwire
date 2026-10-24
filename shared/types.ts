@@ -124,6 +124,12 @@ export interface Finding {
   preview: string;
   service: string;
   nodeId: string;
+  /** How sure the rule is: fixed-format provider tokens are high, name-based matches are medium or low. */
+  confidence?: "high" | "medium" | "low";
+  /** Set when the value was found inside an encoded string, e.g. "base64". */
+  via?: string;
+  /** Accepted in the baseline file: reported, but never blocks. */
+  baselined?: boolean;
   /** Result of asking the provider whether the key works (`--verify`). */
   verify?: Verification;
 }

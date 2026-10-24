@@ -5,7 +5,7 @@ import { basename, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { Finding } from "../../shared/types";
 import type { CiSecretRef } from "./graph";
-import { mask, matchLine } from "./rules";
+import { mask, matchContent } from "./rules";
 
 const run = promisify(execFile);
 
@@ -110,15 +110,19 @@ export interface Raw {
 
 const IGNORE_MARK = /tripwire:ignore|gitleaks:allow/;
 
-function makeFinding(file: string, line: number, text: string, service: string): Raw[] {
-  if (IGNORE_MARK.test(text)) return [];
-  return matchLine(text).map((m) => {
+/** Scans a file or diff hunk (`startLine` is its first line number) and turns each hit into a finding. */
+function findIn(content: string, file: string, startLine: number, service: string): Raw[] {
+  const lines = content.split(/\r?\n/);
+  const out: Raw[] = [];
+  for (const m of matchContent(content, file, startLine)) {
+    if (IGNORE_MARK.test(lines[m.line - startLine] ?? "")) continue;
     const provider = m.rule.id === "tripwire-demo" ? (m.value.split("_")[2] ?? "demo") : m.rule.provider;
-    return {
+    out.push({
       value: m.value,
-      finding: { id: "", rule: m.rule.id, ruleLabel: m.rule.label, provider, variable: m.variable?.toUpperCase(), file, line, inHead: true, preview: mask(m.value, m.rule), service, nodeId: "" },
-    };
-  });
+      finding: { id: "", rule: m.rule.id, ruleLabel: m.rule.label, provider, variable: m.variable?.toUpperCase(), file, line: m.line, inHead: true, preview: mask(m.value, m.rule), service, nodeId: "", confidence: m.confidence, via: m.via },
+    });
+  }
+  return out;
 }
 
 export function scanHead(dir: string, files: string[], dirs: Set<string>, repoName: string): Raw[] {
@@ -127,8 +131,7 @@ export function scanHead(dir: string, files: string[], dirs: Set<string>, repoNa
     if (SKIP_FILE.test(file)) continue;
     const buf = readFileSync(join(dir, file));
     if (buf.includes(0)) continue;
-    const service = serviceFor(file, dirs, repoName);
-    buf.toString("utf8").split(/\r?\n/).forEach((text, i) => out.push(...makeFinding(file, i + 1, text, service)));
+    out.push(...findIn(buf.toString("utf8"), file, 1, serviceFor(file, dirs, repoName)));
   }
   return out;
 }
@@ -137,19 +140,29 @@ function parsePatch(patch: string, dirs: Set<string>, repoName: string, inHead: 
   const raws: Raw[] = [];
   let commit = "";
   let file = "";
-  let line = 0;
   let commits = 0;
+  // Consecutive added lines form one hunk, so multi-line rules (private keys) can match across them.
+  let hunk: string[] = [];
+  let hunkStart = 0;
+  const flush = () => {
+    if (hunk.length && file && !SKIP_FILE.test(file))
+      for (const r of findIn(hunk.join("\n"), file, hunkStart, serviceFor(file, dirs, repoName))) raws.push({ ...r, finding: { ...r.finding, commit: commit || undefined, inHead } });
+    hunk = [];
+  };
   for (const text of patch.split("\n")) {
     if (text.startsWith("__TW__")) {
+      flush();
       commit = text.slice(6);
       commits++;
-    } else if (text.startsWith("+++ ")) file = text.startsWith("+++ b/") ? text.slice(6) : "";
-    else if (text.startsWith("@@")) line = Number(text.match(/\+(\d+)/)?.[1] ?? 0);
-    else if (text.startsWith("+") && file && !SKIP_FILE.test(file)) {
-      for (const r of makeFinding(file, line, text.slice(1), serviceFor(file, dirs, repoName))) raws.push({ ...r, finding: { ...r.finding, commit: commit || undefined, inHead } });
-      line++;
-    }
+    } else if (text.startsWith("+++ ")) {
+      flush();
+      file = text.startsWith("+++ b/") ? text.slice(6) : "";
+    } else if (text.startsWith("@@")) {
+      flush();
+      hunkStart = Number(text.match(/\+(\d+)/)?.[1] ?? 0);
+    } else if (text.startsWith("+") && file) hunk.push(text.slice(1));
   }
+  flush();
   return { raws, commits };
 }
 
