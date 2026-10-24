@@ -78,6 +78,7 @@ export function Graph({ demo, litEdges, litNodes, selectedId, onSelect }: Props)
       zoomOnDoubleClick={false}
       proOptions={{ hideAttribution: true }}
       colorMode="dark"
+      style={{ background: "#020617" }}
       onNodeClick={(_, n) => onSelect((n as TripFlowNode).data.node)}
     >
       <Background color="#1e293b" gap={24} />

@@ -1,14 +1,11 @@
-import { useEffect, useState } from "react";
-import type { GraphNode } from "../../shared/types";
+import { useEffect } from "react";
 import { post } from "./api";
+import { BlastPanel } from "./components/BlastPanel";
 import { Graph } from "./components/Graph";
 import { useStore } from "./state/store";
 
-const EMPTY = new Set<string>();
-
 export default function App() {
-  const { demo, connected, connect } = useStore();
-  const [selected, setSelected] = useState<GraphNode | null>(null);
+  const { demo, connected, connect, selectedId, blast, litEdges, litNodes, showBlast, clearBlast } = useStore();
 
   useEffect(() => connect(), [connect]);
 
@@ -27,8 +24,17 @@ export default function App() {
       </header>
       <main className="flex min-h-0 flex-1">
         <div className="min-w-0 flex-1">
-          <Graph demo={demo} litEdges={EMPTY} litNodes={EMPTY} selectedId={selected?.id ?? null} onSelect={setSelected} />
+          <Graph
+            demo={demo}
+            litEdges={litEdges}
+            litNodes={litNodes}
+            selectedId={selectedId}
+            onSelect={(n) => (n.type === "secret" ? showBlast(n.id) : clearBlast())}
+          />
         </div>
+        <aside className="flex w-[440px] shrink-0 flex-col gap-3 overflow-y-auto border-l border-slate-800 p-4">
+          {blast && <BlastPanel blast={blast} demo={demo} onClose={clearBlast} />}
+        </aside>
       </main>
     </div>
   );

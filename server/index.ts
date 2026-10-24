@@ -2,8 +2,11 @@ import { config } from "dotenv";
 import express from "express";
 import { resolve } from "node:path";
 import { ROOT } from "./paths";
+import type { BlastResult } from "../shared/types";
+import { blastHops } from "./graph";
+import { cannedBlast, generate } from "./llm";
 import { scanTarget } from "./scanner";
-import { resetState, snapshot, state, subscribe } from "./state";
+import { resetState, snapshot, state, subscribe, world } from "./state";
 
 config({ path: resolve(ROOT, ".env.local"), quiet: true });
 resetState();
@@ -22,6 +25,20 @@ app.get("/api/events", (_req, res) => {
 app.post("/api/reset", (_req, res) => {
   resetState();
   res.json({ ok: true });
+});
+
+app.get("/api/blast/:id", async (req, res) => {
+  const start = state.nodes.find((n) => n.id === req.params.id);
+  if (!start) return void res.status(404).json({ error: "unknown node" });
+  const hops = blastHops(state.edges, [start.id]);
+  const canned = cannedBlast(start.id, state.nodes, state.edges, world.notes);
+  const chain = hops.flatMap((h) => h.nodes).map((id) => state.nodes.find((n) => n.id === id)?.label).join(" -> ");
+  const ai = await generate(
+    `Explain to a developer what an attacker can reach if ${start.label} leaks. Chain: ${start.label} -> ${chain}. Notes: ${JSON.stringify(world.notes)}`,
+    canned.explanation,
+  );
+  const result: BlastResult = { nodeId: start.id, hops, explanation: ai.text, worstCase: canned.worstCase, source: ai.source };
+  res.json(result);
 });
 
 app.get("/api/scan", (req, res) => {
