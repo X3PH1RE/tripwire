@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 
 // server/cli/action.ts
-import { readFileSync as readFileSync6 } from "node:fs";
+import { readFileSync as readFileSync7 } from "node:fs";
 
 // server/cli/main.ts
-import { writeFileSync as writeFileSync3 } from "node:fs";
+import { writeFileSync as writeFileSync4 } from "node:fs";
 import { parseArgs } from "node:util";
-import { resolve as resolve4 } from "node:path";
+import { resolve as resolve5 } from "node:path";
 
 // server/real/core.ts
 import { existsSync as existsSync5, rmSync as rmSync2 } from "node:fs";
@@ -4053,6 +4053,10 @@ async function scanDiff(dir, dirs, repoName, base2) {
   }
   return parsePatch(out.stdout, dirs, repoName, true).raws;
 }
+async function scanStaged(dir, dirs, repoName) {
+  const { stdout } = await run("git", ["-C", dir, "diff", "--cached", "-U0", "--no-color", "--no-ext-diff", "--diff-filter=ACMR"], GIT_BUF);
+  return parsePatch(stdout, dirs, repoName, true).raws;
+}
 function mergeFindings(head, history, added) {
   const byValue = /* @__PURE__ */ new Map();
   for (const r of head) if (!byValue.has(r.value)) byValue.set(r.value, r);
@@ -4125,11 +4129,12 @@ async function scanTarget(input2, opts = {}, onStage) {
     const name = repoNameOf(target, dir);
     const branch = await currentBranch(dir).catch(() => void 0);
     onStage?.("secrets", { branch, filesScanned: files.length });
-    const head = scanHead(dir, files, dirs, name);
+    const staged = opts.staged ? (await scanStaged(dir, dirs, name)).filter((r) => !ignored(r.finding.file)) : void 0;
+    const head = staged ?? scanHead(dir, files, dirs, name);
     onStage?.("history", {});
-    const past = await scanHistory(dir, dirs, name, history);
-    let added;
-    if (opts.diff) {
+    const past = staged ? { raws: [], commits: 0 } : await scanHistory(dir, dirs, name, history);
+    let added = staged ? new Set(staged.map((r) => r.value)) : void 0;
+    if (opts.diff && !staged) {
       try {
         added = new Set((await scanDiff(dir, dirs, name, opts.diff)).filter((r) => !ignored(r.finding.file)).map((r) => r.value));
       } catch (err) {
@@ -4150,8 +4155,8 @@ async function scanTarget(input2, opts = {}, onStage) {
     const graph = buildGraph(name, findings, ciSecretRefs(dir, files), samples);
     onStage?.("vulns", { commitsScanned: past.commits, findings, ...graph });
     let vulns = [];
-    if (opts.vulns !== false) vulns = await findVulns(parseDeps(dir, files)).catch((err) => (warnings.push(`Vulnerability lookup failed: ${err.message}`), []));
-    return { target, repo: githubSlug(target), name, branch, filesScanned: files.length, commitsScanned: past.commits, findings, ...graph, vulns, diffBase: added ? opts.diff : void 0, warnings, durationMs: Date.now() - started };
+    if (opts.vulns !== false && !staged) vulns = await findVulns(parseDeps(dir, files)).catch((err) => (warnings.push(`Vulnerability lookup failed: ${err.message}`), []));
+    return { target, repo: githubSlug(target), name, branch, filesScanned: files.length, commitsScanned: past.commits, findings, ...graph, vulns, diffBase: staged ? "staged" : added ? opts.diff : void 0, warnings, durationMs: Date.now() - started };
   } finally {
     if (remote && dir) rmSync2(dir, { recursive: true, force: true });
   }
@@ -4386,8 +4391,58 @@ async function contain(target, apply, json2, log, err, quiet) {
   return stillExposed ? 1 : 0;
 }
 
+// server/cli/hook.ts
+import { execFileSync } from "node:child_process";
+import { chmodSync, existsSync as existsSync6, mkdirSync as mkdirSync3, readFileSync as readFileSync5, rmSync as rmSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { dirname as dirname4, resolve as resolve4 } from "node:path";
+var HOOK_MARKER = "# tripwire-hook";
+var HOOK_SCRIPT = `#!/bin/sh
+${HOOK_MARKER}: installed by \`tripwire install-hook\`. Remove with \`tripwire install-hook --remove\`.
+[ "$TRIPWIRE_SKIP" = "1" ] && exit 0
+if command -v tripwire >/dev/null 2>&1; then
+  exec tripwire scan --staged
+fi
+exec npx --yes tripwire-scan scan --staged
+`;
+function hookPath(dir) {
+  const rel = execFileSync("git", ["-C", dir, "rev-parse", "--git-path", "hooks/pre-commit"], { encoding: "utf8" }).trim();
+  return resolve4(dir, rel);
+}
+function installHook(target, opts, log, err) {
+  const dir = resolve4(target);
+  let path;
+  try {
+    path = hookPath(dir);
+  } catch {
+    return err(`${dir} is not a git repository.
+`), 2;
+  }
+  const existing = existsSync6(path) ? readFileSync5(path, "utf8") : void 0;
+  const ours = existing?.includes(HOOK_MARKER);
+  if (opts.remove) {
+    if (!existing) return log("No pre-commit hook installed.\n"), 0;
+    if (!ours) return err(`${path} was not installed by Tripwire; leaving it alone.
+`), 2;
+    rmSync3(path);
+    return log(`Removed ${path}
+`), 0;
+  }
+  if (existing && !ours && !opts.force) {
+    return err(`A pre-commit hook already exists at ${path}.
+Add \`tripwire scan --staged\` to it yourself, use the pre-commit framework (see README), or re-run with --force to replace it.
+`), 2;
+  }
+  mkdirSync3(dirname4(path), { recursive: true });
+  writeFileSync3(path, HOOK_SCRIPT, { mode: 493 });
+  chmodSync(path, 493);
+  log(`Installed ${path}
+Commits now fail if they add a secret. Bypass once with \`git commit --no-verify\` or TRIPWIRE_SKIP=1.
+`);
+  return 0;
+}
+
 // server/cli/github.ts
-import { appendFileSync as appendFileSync2, readFileSync as readFileSync5 } from "node:fs";
+import { appendFileSync as appendFileSync2, readFileSync as readFileSync6 } from "node:fs";
 
 // server/cli/report.ts
 var MARKER = "<!-- tripwire-report -->";
@@ -4487,7 +4542,7 @@ function pullRequestNumber() {
   const path = process.env.GITHUB_EVENT_PATH;
   if (!path) return void 0;
   try {
-    return JSON.parse(readFileSync5(path, "utf8")).pull_request?.number;
+    return JSON.parse(readFileSync6(path, "utf8")).pull_request?.number;
   } catch {
     return void 0;
   }
@@ -4509,6 +4564,7 @@ var HELP = `Usage: tripwire scan [path | git url | owner/repo] [options]
        tripwire honey create [--email you@x.com] [--plant owner/repo] [--file path]
        tripwire baseline [path]  accept every current finding in .tripwire-baseline.json
        tripwire contain [path]   plan how to kill every live key (--apply to revoke them)
+       tripwire install-hook [path]  block commits that add a secret (--remove, --force)
        tripwire honey check      (exit 1 if any decoy was used)
 
 Finds secrets in the code and git history, maps what each one unlocks,
@@ -4521,6 +4577,7 @@ Options:
   --no-fail-secrets       Report secrets without failing
   --skip-vulns            Skip the dependency check
   --min-confidence <c>    Only findings at this confidence or above block: low|medium|high (default: low)
+  --staged                Scan only what is staged for commit (pre-commit hooks); fast, no history
   --apply                 contain: actually revoke live keys (default is a dry-run plan)
   --no-baseline           Ignore .tripwire-baseline.json
   --verify                Ask each provider (read-only) if found keys work and what they reach
@@ -4547,6 +4604,9 @@ async function main(argv2, log = (s) => process.stdout.write(s), err = (s) => pr
       "min-confidence": { type: "string", default: "low" },
       "no-baseline": { type: "boolean" },
       apply: { type: "boolean" },
+      staged: { type: "boolean" },
+      remove: { type: "boolean" },
+      force: { type: "boolean" },
       email: { type: "string" },
       plant: { type: "string" },
       file: { type: "string" },
@@ -4564,6 +4624,7 @@ async function main(argv2, log = (s) => process.stdout.write(s), err = (s) => pr
   const minConfidence = values["min-confidence"].toLowerCase();
   if (!(minConfidence in CONFIDENCE_RANK)) return err("--min-confidence must be one of low, medium, high\n"), 2;
   if (cmd === "baseline") return baseline(target, log, err);
+  if (cmd === "install-hook") return installHook(target, { remove: !!values.remove, force: !!values.force }, log, err);
   if (cmd === "contain") return contain(target, !!values.apply, values.json === "-", log, err, !!values.quiet);
   if (cmd !== "scan") return err(`Unknown command "${cmd}".
 
@@ -4573,14 +4634,14 @@ ${HELP}`), 2;
 `), 2;
   const history = values.history === void 0 ? void 0 : Number(values.history);
   if (history !== void 0 && !(history >= 0)) return err("--history must be a number >= 0\n"), 2;
-  const report = await scanTarget(target, { history, diff: values.diff, vulns: !values["skip-vulns"], verify: !!values.verify, baseline: !values["no-baseline"] }, (stage) => !values.quiet && err(`tripwire: ${stage}\u2026
+  const report = await scanTarget(target, { history, diff: values.diff, staged: !!values.staged, vulns: !values["skip-vulns"] && !values.staged, verify: !!values.verify, baseline: !values["no-baseline"] }, (stage) => !values.quiet && !values.staged && err(`tripwire: ${stage}\u2026
 `));
   const verdict = evaluate(report, { secrets: !values["no-fail-secrets"], vulns: failVulns === "NONE" ? "none" : failVulns, minConfidence });
   const markdown = toMarkdown(report, verdict);
   if (values.json === "-") log(JSON.stringify(report, null, 2) + "\n");
   else log(toText(report, verdict, !!process.stdout.isTTY && !process.env.NO_COLOR));
-  if (values.json && values.json !== "-") writeFileSync3(values.json, JSON.stringify(report, null, 2));
-  if (values.markdown) writeFileSync3(values.markdown, markdown);
+  if (values.json && values.json !== "-") writeFileSync4(values.json, JSON.stringify(report, null, 2));
+  if (values.markdown) writeFileSync4(values.markdown, markdown);
   if (values.github) for (const line of githubReport(report, verdict, markdown)) log(line + "\n");
   if (values.comment) {
     const note = await upsertPrComment(markdown).catch((e) => `could not comment (${e.message})`);
@@ -4625,7 +4686,7 @@ async function baseline(target, log, err) {
   if (isRemote(target)) return err("tripwire baseline needs a local checkout.\n"), 2;
   const report = await scanTarget(target, { vulns: false, baseline: false });
   const entries = report.findings.flatMap((f) => f.fingerprint ? [{ fingerprint: f.fingerprint, rule: f.rule, file: f.file }] : []);
-  const path = writeBaseline(resolve4(target), entries);
+  const path = writeBaseline(resolve5(target), entries);
   log(`Accepted ${entries.length} finding${entries.length === 1 ? "" : "s"} in ${path}.
 Commit ${BASELINE_FILE}; those findings are still listed but no longer fail the check.
 `);
@@ -4636,7 +4697,7 @@ Commit ${BASELINE_FILE}; those findings are still listed but no longer fail the 
 var input = (name, fallback = "") => (process.env[`INPUT_${name.toUpperCase()}`] ?? "").trim() || fallback;
 function baseSha() {
   try {
-    return JSON.parse(readFileSync6(process.env.GITHUB_EVENT_PATH ?? "", "utf8")).pull_request?.base?.sha;
+    return JSON.parse(readFileSync7(process.env.GITHUB_EVENT_PATH ?? "", "utf8")).pull_request?.base?.sha;
   } catch {
     return void 0;
   }

@@ -7,7 +7,7 @@ import { buildGraph } from "./graph";
 import { honeyKeyIds } from "./honey";
 import { findVulns, parseDeps } from "./osv";
 import { verifyFindings } from "./verify";
-import { ciSecretRefs, cloneRepo, currentBranch, githubSlug, listFiles, loadIgnore, manifestDirs, mergeFindings, normalizeTarget, repoNameOf, scanDiff, scanHead, scanHistory } from "./scan";
+import { ciSecretRefs, cloneRepo, currentBranch, githubSlug, listFiles, loadIgnore, manifestDirs, mergeFindings, normalizeTarget, repoNameOf, scanDiff, scanHead, scanHistory, scanStaged } from "./scan";
 
 export type Stage = "cloning" | "secrets" | "history" | "verify" | "vulns";
 
@@ -19,6 +19,8 @@ export interface ScanOptions {
   vulns?: boolean;
   /** Ask each provider whether found keys still work and what they can reach. */
   verify?: boolean;
+  /** Scan only what is staged for commit (a pre-commit hook): no history, no dependency lookup, nothing outside the index. */
+  staged?: boolean;
   /** Apply `.tripwire-baseline.json` when present (default true). */
   baseline?: boolean;
   /**
@@ -64,11 +66,12 @@ export async function scanTarget(input: string, opts: ScanOptions = {}, onStage?
     const name = repoNameOf(target, dir);
     const branch = await currentBranch(dir).catch(() => undefined);
     onStage?.("secrets", { branch, filesScanned: files.length });
-    const head = scanHead(dir, files, dirs, name);
+    const staged = opts.staged ? (await scanStaged(dir, dirs, name)).filter((r) => !ignored(r.finding.file)) : undefined;
+    const head = staged ?? scanHead(dir, files, dirs, name);
     onStage?.("history", {});
-    const past = await scanHistory(dir, dirs, name, history);
-    let added: Set<string> | undefined;
-    if (opts.diff) {
+    const past = staged ? { raws: [], commits: 0 } : await scanHistory(dir, dirs, name, history);
+    let added: Set<string> | undefined = staged ? new Set(staged.map((r) => r.value)) : undefined;
+    if (opts.diff && !staged) {
       try {
         added = new Set((await scanDiff(dir, dirs, name, opts.diff)).filter((r) => !ignored(r.finding.file)).map((r) => r.value));
       } catch (err) {
@@ -89,8 +92,8 @@ export async function scanTarget(input: string, opts: ScanOptions = {}, onStage?
     const graph = buildGraph(name, findings, ciSecretRefs(dir, files), samples);
     onStage?.("vulns", { commitsScanned: past.commits, findings, ...graph });
     let vulns: VulnPackage[] = [];
-    if (opts.vulns !== false) vulns = await findVulns(parseDeps(dir, files)).catch((err: Error) => (warnings.push(`Vulnerability lookup failed: ${err.message}`), []));
-    return { target, repo: githubSlug(target), name, branch, filesScanned: files.length, commitsScanned: past.commits, findings, ...graph, vulns, diffBase: added ? opts.diff : undefined, warnings, durationMs: Date.now() - started };
+    if (opts.vulns !== false && !staged) vulns = await findVulns(parseDeps(dir, files)).catch((err: Error) => (warnings.push(`Vulnerability lookup failed: ${err.message}`), []));
+    return { target, repo: githubSlug(target), name, branch, filesScanned: files.length, commitsScanned: past.commits, findings, ...graph, vulns, diffBase: staged ? "staged" : added ? opts.diff : undefined, warnings, durationMs: Date.now() - started };
   } finally {
     if (remote && dir) rmSync(dir, { recursive: true, force: true });
   }

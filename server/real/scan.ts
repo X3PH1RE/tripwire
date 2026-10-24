@@ -188,6 +188,12 @@ export async function scanDiff(dir: string, dirs: Set<string>, repoName: string,
   return parsePatch(out.stdout, dirs, repoName, true).raws;
 }
 
+/** Lines added to the index (`git add`ed, not yet committed): what a pre-commit hook must stop. */
+export async function scanStaged(dir: string, dirs: Set<string>, repoName: string): Promise<Raw[]> {
+  const { stdout } = await run("git", ["-C", dir, "diff", "--cached", "-U0", "--no-color", "--no-ext-diff", "--diff-filter=ACMR"], GIT_BUF);
+  return parsePatch(stdout, dirs, repoName, true).raws;
+}
+
 /** Merges HEAD and history hits: one finding per distinct secret value; history-only ones are flagged. */
 export function mergeFindings(head: Raw[], history: Raw[], added?: Set<string>): { findings: Finding[]; samples: Map<string, string>; values: Map<string, string> } {
   const byValue = new Map<string, Raw>();

@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { scanTarget } from "../real/core";
 import { ignoreMatcher } from "../real/scan";
 import { evaluate, toMarkdown, unlocks } from "./report";
+import { installHook } from "./hook";
 import { main } from "./main";
 
 // Built at runtime so no provider-format token is ever committed.
@@ -198,5 +199,78 @@ test("contain: dry run plans without touching the provider; --apply revokes and 
     delete process.env.TRIPWIRE_HOME;
     rmSync(dir, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("--staged blocks only what is staged for commit", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tw-staged-"));
+  const git = (...a: string[]) => execFileSync("git", ["-C", dir, "-c", "user.name=t", "-c", "user.email=t@t", ...a], { stdio: "ignore" });
+  const run = async (...args: string[]) => {
+    let out = "";
+    const code = await main(["scan", dir, "--staged", ...args], (s) => (out += s), () => undefined);
+    return { code, out };
+  };
+  try {
+    git("init", "-q", "-b", "main");
+    writeFileSync(join(dir, "README.md"), "hello\n");
+    git("add", "-A");
+    git("commit", "-qm", "base");
+
+    // A secret that is in the working tree but not staged does not block the commit.
+    writeFileSync(join(dir, "pay.js"), `const key = "${STRIPE}";\n`);
+    assert.equal((await run()).code, 0);
+
+    git("add", "pay.js");
+    const blocked = await run();
+    assert.equal(blocked.code, 1);
+    assert.match(blocked.out, /pay\.js:1/);
+    assert.ok(!blocked.out.includes(STRIPE), "never prints the secret");
+
+    // Ignore marker, ignore file and baseline all still apply.
+    writeFileSync(join(dir, "pay.js"), `const key = "${STRIPE}"; // tripwire:ignore\n`);
+    git("add", "pay.js");
+    assert.equal((await run()).code, 0);
+
+    // Editing a line that already holds a committed secret is not "adding" one in a way that hides it: it is still caught.
+    writeFileSync(join(dir, "pay.js"), `const key = "${STRIPE}";\n`);
+    git("add", "pay.js");
+    git("commit", "-qm", "bypass", "--no-verify");
+    writeFileSync(join(dir, "other.js"), "// unrelated\n");
+    git("add", "other.js");
+    assert.equal((await run()).code, 0, "a secret already committed is not this commit's problem");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("install-hook writes a pre-commit hook, refuses to clobber someone else's, and removes only its own", () => {
+  const dir = mkdtempSync(join(tmpdir(), "tw-hook-"));
+  let out = "";
+  let errs = "";
+  const log = (s: string) => (out += s);
+  const err = (s: string) => (errs += s);
+  try {
+    execFileSync("git", ["-C", dir, "init", "-q"], { stdio: "ignore" });
+    const hook = join(dir, ".git", "hooks", "pre-commit");
+    assert.equal(installHook(dir, {}, log, err), 0);
+    const body = readFileSync(hook, "utf8");
+    assert.match(body, /^#!\/bin\/sh/);
+    assert.match(body, /tripwire scan --staged/);
+    assert.equal(installHook(dir, {}, log, err), 0, "re-installing our own hook is fine");
+
+    assert.equal(installHook(dir, { remove: true }, log, err), 0);
+    assert.equal(existsSync(hook), false);
+
+    writeFileSync(hook, "#!/bin/sh\necho mine\n");
+    assert.equal(installHook(dir, {}, log, err), 2, "someone else's hook is left alone");
+    assert.match(errs, /already exists/);
+    assert.equal(readFileSync(hook, "utf8"), "#!/bin/sh\necho mine\n");
+    assert.equal(installHook(dir, { remove: true }, log, err), 2);
+    assert.equal(installHook(dir, { force: true }, log, err), 0);
+    assert.match(readFileSync(hook, "utf8"), /tripwire-hook/);
+
+    assert.equal(installHook(tmpdir(), {}, log, err), 2, "not a git repo");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

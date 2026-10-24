@@ -6,6 +6,7 @@ import { isRemote, scanTarget } from "../real/core";
 import { BASELINE_FILE, writeBaseline } from "../detect/baseline";
 import { CONFIDENCE_RANK, type Confidence } from "../detect/schema";
 import { contain } from "./contain";
+import { installHook } from "./hook";
 import { checkHoney, createHoney, decoyFile, HONEY_FILE, plantHoney, publicHoney } from "../real/honey";
 import { githubReport, upsertPrComment } from "./github";
 import { evaluate, RANK, toMarkdown, toText } from "./report";
@@ -14,6 +15,7 @@ export const HELP = `Usage: tripwire scan [path | git url | owner/repo] [options
        tripwire honey create [--email you@x.com] [--plant owner/repo] [--file path]
        tripwire baseline [path]  accept every current finding in .tripwire-baseline.json
        tripwire contain [path]   plan how to kill every live key (--apply to revoke them)
+       tripwire install-hook [path]  block commits that add a secret (--remove, --force)
        tripwire honey check      (exit 1 if any decoy was used)
 
 Finds secrets in the code and git history, maps what each one unlocks,
@@ -26,6 +28,7 @@ Options:
   --no-fail-secrets       Report secrets without failing
   --skip-vulns            Skip the dependency check
   --min-confidence <c>    Only findings at this confidence or above block: low|medium|high (default: low)
+  --staged                Scan only what is staged for commit (pre-commit hooks); fast, no history
   --apply                 contain: actually revoke live keys (default is a dry-run plan)
   --no-baseline           Ignore .tripwire-baseline.json
   --verify                Ask each provider (read-only) if found keys work and what they reach
@@ -53,6 +56,9 @@ export async function main(argv: string[], log: (s: string) => void = (s) => pro
       "min-confidence": { type: "string", default: "low" },
       "no-baseline": { type: "boolean" },
       apply: { type: "boolean" },
+      staged: { type: "boolean" },
+      remove: { type: "boolean" },
+      force: { type: "boolean" },
       email: { type: "string" },
       plant: { type: "string" },
       file: { type: "string" },
@@ -70,6 +76,7 @@ export async function main(argv: string[], log: (s: string) => void = (s) => pro
   const minConfidence = values["min-confidence"]!.toLowerCase();
   if (!(minConfidence in CONFIDENCE_RANK)) return err("--min-confidence must be one of low, medium, high\n"), 2;
   if (cmd === "baseline") return baseline(target, log, err);
+  if (cmd === "install-hook") return installHook(target, { remove: !!values.remove, force: !!values.force }, log, err);
   if (cmd === "contain") return contain(target, !!values.apply, values.json === "-", log, err, !!values.quiet);
   if (cmd !== "scan") return err(`Unknown command "${cmd}".\n\n${HELP}`), 2;
   const failVulns = values["fail-on-vulns"]!.toUpperCase();
@@ -77,7 +84,7 @@ export async function main(argv: string[], log: (s: string) => void = (s) => pro
   const history = values.history === undefined ? undefined : Number(values.history);
   if (history !== undefined && !(history >= 0)) return err("--history must be a number >= 0\n"), 2;
 
-  const report = await scanTarget(target, { history, diff: values.diff, vulns: !values["skip-vulns"], verify: !!values.verify, baseline: !values["no-baseline"] }, (stage) => !values.quiet && err(`tripwire: ${stage}…\n`));
+  const report = await scanTarget(target, { history, diff: values.diff, staged: !!values.staged, vulns: !values["skip-vulns"] && !values.staged, verify: !!values.verify, baseline: !values["no-baseline"] }, (stage) => !values.quiet && !values.staged && err(`tripwire: ${stage}…\n`));
   const verdict = evaluate(report, { secrets: !values["no-fail-secrets"], vulns: failVulns === "NONE" ? "none" : (failVulns as Severity), minConfidence: minConfidence as Confidence });
   const markdown = toMarkdown(report, verdict);
 

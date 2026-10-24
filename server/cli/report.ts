@@ -91,10 +91,12 @@ export function toText(r: ScanReport, v: Verdict, color: boolean, maxVulns = 10)
     out.push(dim(`        ${f.preview}${f.verify?.identity ? `  as ${f.verify.identity}` : ""}${u.length ? `  → unlocks ${u.join(", ")}` : ""}`));
     if (f.verify?.note && f.verify.status !== "live") out.push(dim(`        ${f.verify.note}`));
   }
-  out.push("", bold(`Vulnerable dependencies (${r.vulns.length})`));
-  if (!r.vulns.length) out.push(dim("  none found"));
-  for (const x of r.vulns.slice(0, maxVulns)) out.push(`  ${sev(x.severity)} ${`${x.name}@${x.version}`.padEnd(30)} ${x.fixed ? green(`→ ${x.fixed}`.padEnd(14)) : dim("no fix".padEnd(14))} ${dim(`${x.file}  ${x.advisories[0].id}`)}`);
-  if (r.vulns.length > maxVulns) out.push(dim(`  …and ${r.vulns.length - maxVulns} more (use --json for the full list)`));
+  // A pre-commit scan does not look at dependencies, so do not claim there are none.
+  const showVulns = r.diffBase !== "staged";
+  if (showVulns) out.push("", bold(`Vulnerable dependencies (${r.vulns.length})`));
+  if (showVulns && !r.vulns.length) out.push(dim("  none found"));
+  for (const x of showVulns ? r.vulns.slice(0, maxVulns) : []) out.push(`  ${sev(x.severity)} ${`${x.name}@${x.version}`.padEnd(30)} ${x.fixed ? green(`→ ${x.fixed}`.padEnd(14)) : dim("no fix".padEnd(14))} ${dim(`${x.file}  ${x.advisories[0].id}`)}`);
+  if (showVulns && r.vulns.length > maxVulns) out.push(dim(`  …and ${r.vulns.length - maxVulns} more (use --json for the full list)`));
   for (const w of r.warnings) out.push("", yellow(`warning: ${w}`));
   out.push("", v.failed ? `${red(bold("FAIL"))}  ${v.reasons.join(", ")}` : `${green(bold("PASS"))}  no blocking findings`, "");
   return out.join("\n");

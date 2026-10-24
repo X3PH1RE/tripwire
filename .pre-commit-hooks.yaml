@@ -1,0 +1,14 @@
+# For the pre-commit framework (https://pre-commit.com). In your repo's .pre-commit-config.yaml:
+#
+#   repos:
+#     - repo: https://github.com/X3PH1RE/tripwire
+#       rev: v1.0.0
+#       hooks:
+#         - id: tripwire
+- id: tripwire
+  name: Tripwire secret scan
+  description: Blocks a commit that adds a secret (staged changes only).
+  entry: tripwire scan --staged
+  language: node
+  pass_filenames: false
+  always_run: true
