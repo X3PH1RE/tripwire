@@ -145,6 +145,8 @@ npm run bench -- --gate   # exit 1 if Tripwire drops below 95% precision or reca
 
 [bench/RESULTS.md](bench/RESULTS.md) has the latest numbers. The corpus (`bench/corpus.mts`) is written by this project, so it favours Tripwire's own rules: treat it as a regression gate and a parity check, not an independent ranking. Add a case whenever a real repo produces a miss or a false positive; several of the filters above came from scanning Flask, Django and NodeGoat.
 
+Because that corpus is ours, there is a second benchmark on data we did not write: `npm run bench:coverage` fetches TruffleHog's detector tests (743 providers with example credentials) and counts how many providers each tool recognises at all. Tripwire is level with Gitleaks there (347 and 351 of 743, see [bench/COVERAGE.md](bench/COVERAGE.md)) and recognises well under half of TruffleHog's providers, so on breadth it does not beat either; the case for Tripwire is the engine's false-positive filtering, the CI trust model, and what happens after a key is found (verify, blast radius, containment), not the number of providers.
+
 ### Containment (`tripwire contain`)
 
 ```bash

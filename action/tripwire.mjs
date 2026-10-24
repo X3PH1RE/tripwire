@@ -855,7 +855,7 @@ var KeywordIndex = class {
 var MAX_LINE = 2e3;
 var LONG_OVERLAP = 400;
 var MAX_PER_RULE_PER_LINE = 10;
-var ASSIGN = /\b([A-Za-z][A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD|CREDENTIALS?|AUTH|URL|URI|DSN)|PASSWORD|PASSWD|SECRET|TOKEN|CREDENTIALS?)["']?\s*[:=]\s*["']?([^\s"'`,;&]+)/i;
+var ASSIGN = /\b([A-Za-z][A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD|CREDENTIALS?|AUTH|URL|URI|DSN)|PASSWORD|PASSWD|SECRET|TOKEN|CREDENTIALS?|KEY|API[A-Za-z0-9_]*)["']?\s*(?::=|=>|\?=|[:=])\s*["']?([^\s"'`,;&]+)/i;
 var STRONG_NAME = /SECRET|PASSWORD|PASSWD|PWD|TOKEN|API_?KEY|PRIVATE|CREDENTIAL/i;
 var GENERIC_SKIP_PATH = /(?:^|\/)(?:__snapshots__|__fixtures__|fixtures?|testdata|test-data|mocks?|node_modules|vendor)\/|\.(?:snap|lock|min\.js|map|svg)$|(?:^|\/)(?:package-lock\.json|yarn\.lock|pnpm-lock\.yaml)$/i;
 var NO_RULES = [];
@@ -1113,10 +1113,13 @@ var Engine = class {
   generic(text, path, line, a) {
     if (!a || path && GENERIC_SKIP_PATH.test(path)) return void 0;
     const value = a[2];
+    if (value.startsWith("=")) return void 0;
     if (value.length < 16 || value.length > 200) return void 0;
-    const strong = STRONG_NAME.test(a[1]) && !HASHY_NAME.test(a[1]);
+    const bare = /^key$/i.test(a[1]);
+    const strong = (STRONG_NAME.test(a[1]) || bare) && !HASHY_NAME.test(a[1]);
     if (value.includes("://") || /[\\()[\]{}^]/.test(value) || isPlaceholder(value) || looksBenign(value, strong) || pathLike(value)) return void 0;
     if (/^[a-z]+(?:[._-][a-z]+)*$/i.test(value)) return void 0;
+    if (bare && value.length < 20) return void 0;
     const hexOnly = /^[0-9a-f]+$/i.test(value);
     const h = entropy(value);
     if (h < (hexOnly ? 3.2 : 3.8)) return void 0;
@@ -4565,14 +4568,14 @@ var status = (f) => [f.isNew ? "new" : f.inHead ? "in code" : "history", f.basel
 var reach = (r, f) => f.verify?.access?.length ? f.verify.access.map((a) => a.label) : f.verify?.status === "revoked" || f.verify?.status === "honey" ? [] : unlocks(r, f);
 var order = (f) => f.isNew ? 0 : f.inHead ? 1 : 2;
 var sorted = (fs) => [...fs].sort((a, b) => order(a) - order(b));
-var cell = (s) => s.replace(/\|/g, "\\|").replace(/\n/g, " ");
+var cell = (s) => s.replace(/\|/g, "\\|").replace(/`/g, "'").replace(/\r?\n|\r/g, " ");
 function toMarkdown(r, v, maxVulns = 15) {
   const out = [MARKER, "## Tripwire", ""];
   out.push(v.failed ? `**Failed:** ${v.reasons.join(", ")}.` : "**Passed:** no blocking findings.", "");
   if (r.findings.length) {
     out.push(`### Secrets (${r.findings.length})`, "", "| Status | Secret | Location | Type | Unlocks |", "| --- | --- | --- | --- | --- |");
     for (const f of sorted(r.findings)) {
-      const where = f.inHead ? `\`${f.file}:${f.line}\`` : `\`${f.file}:${f.line}\` (commit ${f.commit})`;
+      const where = f.inHead ? `\`${cell(f.file)}:${f.line}\`` : `\`${cell(f.file)}:${f.line}\` (commit ${cell(String(f.commit))})`;
       out.push(`| ${status(f)} | \`${cell(f.variable ?? f.ruleLabel)}\` \`${cell(f.preview)}\` | ${where} | ${cell(f.ruleLabel)} | ${cell(reach(r, f).join(", ") || "-")}${f.verify?.identity ? ` (as \`${cell(f.verify.identity)}\`)` : ""} |`);
     }
     out.push("");
@@ -4581,7 +4584,7 @@ function toMarkdown(r, v, maxVulns = 15) {
   if (r.vulns.length) {
     const counts = ["CRITICAL", "HIGH", "MODERATE", "LOW"].map((s) => [s, r.vulns.filter((x) => x.severity === s).length]).filter(([, n]) => n);
     out.push(`### Vulnerable dependencies (${r.vulns.length})`, "", counts.map(([s, n]) => `${n} ${s.toLowerCase()}`).join(" \xB7 "), "", "| Package | Version | Fixed in | Severity | Advisory |", "| --- | --- | --- | --- | --- |");
-    for (const x of r.vulns.slice(0, maxVulns)) out.push(`| \`${x.name}\` (${x.ecosystem}${x.direct ? "" : ", transitive"}) | ${x.version} | ${x.fixed ?? "-"} | ${x.severity.toLowerCase()} | ${x.advisories[0].id}: ${cell(x.advisories[0].summary).slice(0, 90)} |`);
+    for (const x of r.vulns.slice(0, maxVulns)) out.push(`| \`${cell(x.name)}\` (${x.ecosystem}${x.direct ? "" : ", transitive"}) | ${x.version} | ${x.fixed ?? "-"} | ${x.severity.toLowerCase()} | ${x.advisories[0].id}: ${cell(x.advisories[0].summary).slice(0, 90)} |`);
     if (r.vulns.length > maxVulns) out.push("", `\u2026and ${r.vulns.length - maxVulns} more.`);
     out.push("");
   }

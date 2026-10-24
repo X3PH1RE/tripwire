@@ -53,7 +53,12 @@ const status = (f: Finding) => [f.isNew ? "new" : f.inHead ? "in code" : "histor
 const reach = (r: ScanReport, f: Finding) => (f.verify?.access?.length ? f.verify.access.map((a) => a.label) : f.verify?.status === "revoked" || f.verify?.status === "honey" ? [] : unlocks(r, f));
 const order = (f: Finding) => (f.isNew ? 0 : f.inHead ? 1 : 2);
 const sorted = (fs: Finding[]) => [...fs].sort((a, b) => order(a) - order(b));
-const cell = (s: string) => s.replace(/\|/g, "\\|").replace(/\n/g, " ");
+/**
+ * Text from the scanned repository (file names, variable names) ends up in a PR comment. A backtick would close the code
+ * span it sits in and let a hostile repo inject links and @mentions into the bot's comment, so backticks are neutralised
+ * along with the table delimiter and line breaks.
+ */
+const cell = (s: string) => s.replace(/\|/g, "\\|").replace(/`/g, "'").replace(/\r?\n|\r/g, " ");
 
 export function toMarkdown(r: ScanReport, v: Verdict, maxVulns = 15): string {
   const out = [MARKER, "## Tripwire", ""];
@@ -61,7 +66,7 @@ export function toMarkdown(r: ScanReport, v: Verdict, maxVulns = 15): string {
   if (r.findings.length) {
     out.push(`### Secrets (${r.findings.length})`, "", "| Status | Secret | Location | Type | Unlocks |", "| --- | --- | --- | --- | --- |");
     for (const f of sorted(r.findings)) {
-      const where = f.inHead ? `\`${f.file}:${f.line}\`` : `\`${f.file}:${f.line}\` (commit ${f.commit})`;
+      const where = f.inHead ? `\`${cell(f.file)}:${f.line}\`` : `\`${cell(f.file)}:${f.line}\` (commit ${cell(String(f.commit))})`;
       out.push(`| ${status(f)} | \`${cell(f.variable ?? f.ruleLabel)}\` \`${cell(f.preview)}\` | ${where} | ${cell(f.ruleLabel)} | ${cell(reach(r, f).join(", ") || "-")}${f.verify?.identity ? ` (as \`${cell(f.verify.identity)}\`)` : ""} |`);
     }
     out.push("");
@@ -70,7 +75,7 @@ export function toMarkdown(r: ScanReport, v: Verdict, maxVulns = 15): string {
   if (r.vulns.length) {
     const counts = (["CRITICAL", "HIGH", "MODERATE", "LOW"] as Severity[]).map((s) => [s, r.vulns.filter((x) => x.severity === s).length] as const).filter(([, n]) => n);
     out.push(`### Vulnerable dependencies (${r.vulns.length})`, "", counts.map(([s, n]) => `${n} ${s.toLowerCase()}`).join(" · "), "", "| Package | Version | Fixed in | Severity | Advisory |", "| --- | --- | --- | --- | --- |");
-    for (const x of r.vulns.slice(0, maxVulns)) out.push(`| \`${x.name}\` (${x.ecosystem}${x.direct ? "" : ", transitive"}) | ${x.version} | ${x.fixed ?? "-"} | ${x.severity.toLowerCase()} | ${x.advisories[0].id}: ${cell(x.advisories[0].summary).slice(0, 90)} |`);
+    for (const x of r.vulns.slice(0, maxVulns)) out.push(`| \`${cell(x.name)}\` (${x.ecosystem}${x.direct ? "" : ", transitive"}) | ${x.version} | ${x.fixed ?? "-"} | ${x.severity.toLowerCase()} | ${x.advisories[0].id}: ${cell(x.advisories[0].summary).slice(0, 90)} |`);
     if (r.vulns.length > maxVulns) out.push("", `…and ${r.vulns.length - maxVulns} more.`);
     out.push("");
   }

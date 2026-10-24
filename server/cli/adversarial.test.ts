@@ -10,7 +10,7 @@ import { writeBaseline } from "../detect/baseline";
 import { fingerprint } from "../detect/filters";
 import { guard, hostAllowed, originAllowed } from "../guard";
 import { scanTarget } from "../real/core";
-import { evaluate } from "./report";
+import { evaluate, toMarkdown } from "./report";
 
 // Token-shaped values are built at run time so nothing provider-shaped is committed.
 const pad = (n: number) => Array.from({ length: n }, (_, i) => "AbCdEfGhJkLmNpQrStUvWxYz23456789"[(i * 7 + 3) % 32]).join("");
@@ -195,4 +195,15 @@ test("a key in an SVG is found (Gitleaks' default allowlist skips them)", async 
   } finally {
     cleanup();
   }
+});
+
+test("untrusted file and variable names cannot break out of the PR comment's code spans", () => {
+  const hostile = "a`](https://evil.example) @octocat `b.env";
+  const finding = { id: "f-0", rule: "stripe-live", ruleLabel: "Stripe live key", provider: "stripe", variable: hostile, file: hostile, line: 1, inHead: true, preview: "sk_liv", service: "app", nodeId: "" };
+  const report = { findings: [finding], nodes: [], edges: [], vulns: [{ key: "k", ecosystem: "npm", name: hostile, version: "1.0.0", file: "package-lock.json", direct: true, severity: "HIGH", advisories: [{ id: "X", summary: "s", severity: "HIGH" }], fixable: false }], warnings: [], filesScanned: 1, commitsScanned: 0, durationMs: 1 } as never;
+  const md = toMarkdown(report, { failed: true, reasons: [], blocking: [], blockingVulns: [] });
+  assert.ok(!md.includes("`](https://evil.example)"), "the backtick that would close the span is neutralised");
+  const outsideCode = md.replace(/`[^`\n]*`/g, "");
+  assert.ok(!outsideCode.includes("@octocat"), "no live @mention outside a code span");
+  assert.ok(!outsideCode.includes("evil.example"), "no live link outside a code span");
 });

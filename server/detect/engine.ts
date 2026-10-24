@@ -35,7 +35,7 @@ const LONG_OVERLAP = 400;
 const MAX_PER_RULE_PER_LINE = 10;
 
 // A name ending in KEY/TOKEN/..., or one of the unambiguous bare names (`password: ...`, `secret = ...`).
-const ASSIGN = /\b([A-Za-z][A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD|CREDENTIALS?|AUTH|URL|URI|DSN)|PASSWORD|PASSWD|SECRET|TOKEN|CREDENTIALS?)["']?\s*[:=]\s*["']?([^\s"'`,;&]+)/i;
+const ASSIGN = /\b([A-Za-z][A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD|CREDENTIALS?|AUTH|URL|URI|DSN)|PASSWORD|PASSWD|SECRET|TOKEN|CREDENTIALS?|KEY|API[A-Za-z0-9_]*)["']?\s*(?::=|=>|\?=|[:=])\s*["']?([^\s"'`,;&]+)/i;
 const STRONG_NAME = /SECRET|PASSWORD|PASSWD|PWD|TOKEN|API_?KEY|PRIVATE|CREDENTIAL/i;
 /** Where generic (name-based) matches are noise: lockfiles, vendored code, fixtures and generated output. */
 const GENERIC_SKIP_PATH = /(?:^|\/)(?:__snapshots__|__fixtures__|fixtures?|testdata|test-data|mocks?|node_modules|vendor)\/|\.(?:snap|lock|min\.js|map|svg)$|(?:^|\/)(?:package-lock\.json|yarn\.lock|pnpm-lock\.yaml)$/i;
@@ -326,10 +326,14 @@ export class Engine {
   private generic(text: string, path: string | undefined, line: number, a: RegExpMatchArray | null): Hit | undefined {
     if (!a || (path && GENERIC_SKIP_PATH.test(path))) return undefined;
     const value = a[2];
+    if (value.startsWith("=")) return undefined; // `==` comparison, not an assignment
     if (value.length < 16 || value.length > 200) return undefined;
-    const strong = STRONG_NAME.test(a[1]) && !HASHY_NAME.test(a[1]);
+    const bare = /^key$/i.test(a[1]);
+    const strong = (STRONG_NAME.test(a[1]) || bare) && !HASHY_NAME.test(a[1]);
     if (value.includes("://") || /[\\()[\]{}^]/.test(value) || isPlaceholder(value) || looksBenign(value, strong) || pathLike(value)) return undefined;
     if (/^[a-z]+(?:[._-][a-z]+)*$/i.test(value)) return undefined;
+    // A bare `key` is also React's `key={id}` and i18n keys, so it needs a long, random-looking value to count.
+    if (bare && value.length < 20) return undefined;
     // A hex alphabet has 16 symbols, so random hex tops out near 4.0 bits; judge it on its own scale.
     const hexOnly = /^[0-9a-f]+$/i.test(value);
     const h = entropy(value);

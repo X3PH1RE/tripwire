@@ -52,7 +52,8 @@
     "bench": "tsx bench/run.mts",
     "bench:fetch": "tsx bench/fetch-gitleaks.mts",
     "prepack": "npm run build:cli",
-    "demo:record": "tsx scripts/record-demo.mts"
+    "demo:record": "tsx scripts/record-demo.mts",
+    "bench:coverage": "tsx bench/coverage.mts"
   },
   "devDependencies": {
     "concurrently": "^9.2.5",
