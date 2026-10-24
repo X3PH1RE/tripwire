@@ -219,7 +219,7 @@ const GIT_BUF = { maxBuffer: 256 * 1024 * 1024, timeout: 60_000 };
 export async function scanHistory(dir: string, dirs: Set<string>, repoName: string, limit = HISTORY_COMMITS): Promise<{ raws: Raw[]; commits: number }> {
   if (limit <= 0 || !existsSync(join(dir, ".git"))) return { raws: [], commits: 0 };
   try {
-    const { stdout } = await run("git", ["-C", dir, "log", "-p", "-U0", "--no-merges", "--no-color", "--no-ext-diff", "--format=__TW__%h", "-n", String(limit)], GIT_BUF);
+    const { stdout } = await run("git", ["-C", dir, "log", "-p", "-U0", "--no-merges", "--no-color", "--no-ext-diff", "--no-textconv", "--format=__TW__%h", "-n", String(limit)], GIT_BUF);
     return parsePatch(stdout, dirs, repoName, false);
   } catch (err) {
     // A freshly `git init`ed repo has no commits, hence no history; that is not an error.
@@ -230,7 +230,7 @@ export async function scanHistory(dir: string, dirs: Set<string>, repoName: stri
 
 /** Lines added between `base` and HEAD, i.e. what a pull request introduces. Fetches `base` if a shallow checkout lacks it. */
 export async function scanDiff(dir: string, dirs: Set<string>, repoName: string, base: string, ctx?: IgnoreCtx): Promise<Raw[]> {
-  const diff = () => run("git", ["-C", dir, "diff", "-U0", "--no-color", "--no-ext-diff", base, "HEAD"], GIT_BUF);
+  const diff = () => run("git", ["-C", dir, "diff", "-U0", "--no-color", "--no-ext-diff", "--no-textconv", base, "HEAD"], GIT_BUF);
   let out: { stdout: string };
   try {
     out = await diff();
@@ -260,7 +260,7 @@ export async function readAtRef(dir: string, ref: string, path: string): Promise
 
 /** Lines added to the index (`git add`ed, not yet committed): what a pre-commit hook must stop. */
 export async function scanStaged(dir: string, dirs: Set<string>, repoName: string, ctx?: IgnoreCtx): Promise<Raw[]> {
-  const { stdout } = await run("git", ["-C", dir, "diff", "--cached", "-U0", "--no-color", "--no-ext-diff", "--diff-filter=ACMR"], GIT_BUF);
+  const { stdout } = await run("git", ["-C", dir, "diff", "--cached", "-U0", "--no-color", "--no-ext-diff", "--no-textconv", "--diff-filter=ACMR"], GIT_BUF);
   return parsePatch(stdout, dirs, repoName, true, ctx).raws;
 }
 

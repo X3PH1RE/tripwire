@@ -3908,7 +3908,7 @@ var tripwirePack = {
     rule({ id: "figma-token", label: "Figma access token", provider: "figma", regex: "\\b(figd_[A-Za-z0-9_-]{40})\\b", keywords: ["figd_"] }),
     rule({ id: "neon-key", label: "Neon API key", provider: "neon", regex: "\\b(napi_[a-z0-9]{64})\\b", keywords: ["napi_"] }),
     rule({ id: "azure-storage-key", label: "Azure storage account key", provider: "azure", regex: "AccountKey=([A-Za-z0-9+/]{86}==)", keywords: ["accountkey="] }),
-    // https://user:password@host: credentials embedded in a URL. Tutorial passwords (admin:admin) rank low; see the db-password check.
+    // Credentials embedded in a URL (scheme, user, password, host). Tutorial passwords (admin:admin) rank low; see the db-password check.
     rule({ id: "url-basic-auth", label: "Credentials in a URL", provider: "url", confidence: "medium", regex: `\\bhttps?:\\/\\/([^\\s:/@"'<>{}$]{1,64}):([^\\s@"'/<>{}$]{4,128})@[A-Za-z0-9][A-Za-z0-9.-]*`, secretGroup: 2, check: "db-password", keywords: ["://"] }),
     // The password group is what gets checked; the whole URL is what gets reported.
     rule({ id: "db-url", label: "Database URL with password", provider: "database", regex: `\\b((?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\\+srv)?|redis|rediss|amqps?):\\/\\/[^\\s:/@"']+:([^\\s@"'/]+)@[^\\s"']+)`, secretGroup: 2, reportGroup: 1, minLength: 6, check: "db-password", keywords: ["://"] }),
@@ -4097,7 +4097,7 @@ var GIT_BUF = { maxBuffer: 256 * 1024 * 1024, timeout: 6e4 };
 async function scanHistory(dir, dirs, repoName, limit = HISTORY_COMMITS) {
   if (limit <= 0 || !existsSync4(join4(dir, ".git"))) return { raws: [], commits: 0 };
   try {
-    const { stdout } = await run("git", ["-C", dir, "log", "-p", "-U0", "--no-merges", "--no-color", "--no-ext-diff", "--format=__TW__%h", "-n", String(limit)], GIT_BUF);
+    const { stdout } = await run("git", ["-C", dir, "log", "-p", "-U0", "--no-merges", "--no-color", "--no-ext-diff", "--no-textconv", "--format=__TW__%h", "-n", String(limit)], GIT_BUF);
     return parsePatch(stdout, dirs, repoName, false);
   } catch (err) {
     if (/does not have any commits yet|bad default revision|unknown revision/i.test(String(err.stderr ?? err))) return { raws: [], commits: 0 };
@@ -4105,7 +4105,7 @@ async function scanHistory(dir, dirs, repoName, limit = HISTORY_COMMITS) {
   }
 }
 async function scanDiff(dir, dirs, repoName, base, ctx) {
-  const diff = () => run("git", ["-C", dir, "diff", "-U0", "--no-color", "--no-ext-diff", base, "HEAD"], GIT_BUF);
+  const diff = () => run("git", ["-C", dir, "diff", "-U0", "--no-color", "--no-ext-diff", "--no-textconv", base, "HEAD"], GIT_BUF);
   let out;
   try {
     out = await diff();
@@ -4129,7 +4129,7 @@ async function readAtRef(dir, ref, path) {
   }
 }
 async function scanStaged(dir, dirs, repoName, ctx) {
-  const { stdout } = await run("git", ["-C", dir, "diff", "--cached", "-U0", "--no-color", "--no-ext-diff", "--diff-filter=ACMR"], GIT_BUF);
+  const { stdout } = await run("git", ["-C", dir, "diff", "--cached", "-U0", "--no-color", "--no-ext-diff", "--no-textconv", "--diff-filter=ACMR"], GIT_BUF);
   return parsePatch(stdout, dirs, repoName, true, ctx).raws;
 }
 function mergeFindings(head, history, added) {
