@@ -19,6 +19,8 @@ if (base) argv.push("--diff", base);
 if (base && input("comment", "true") === "true") argv.push("--comment");
 if (input("fail-on-secrets", "true") === "false") argv.push("--no-fail-secrets");
 if (input("verify", "false") === "true") argv.push("--verify");
+if (input("baseline", "true") === "false") argv.push("--no-baseline");
+argv.push("--min-confidence", input("min-confidence", "low"));
 
 main(argv).then(
   (code) => process.exit(code),

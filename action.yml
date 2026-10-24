@@ -23,6 +23,12 @@ inputs:
   verify:
     description: Ask each provider (read-only) whether found keys still work and what they can reach. Revoked keys stop failing the check.
     default: "false"
+  min-confidence:
+    description: Only findings at this confidence or above fail the check (low, medium, high). Lower-confidence findings are still reported.
+    default: "low"
+  baseline:
+    description: Accept the findings listed in .tripwire-baseline.json (create it with "tripwire baseline"). Accepted findings are reported but never fail the check.
+    default: "true"
   token:
     description: Token used to comment on pull requests.
     default: ${{ github.token }}

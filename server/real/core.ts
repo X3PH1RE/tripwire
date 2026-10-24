@@ -1,6 +1,8 @@
 import { existsSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Finding, GraphEdge, GraphNode, VulnPackage } from "../../shared/types";
+import { loadBaseline } from "../detect/baseline";
+import { fingerprint } from "../detect/filters";
 import { buildGraph } from "./graph";
 import { honeyKeyIds } from "./honey";
 import { findVulns, parseDeps } from "./osv";
@@ -17,6 +19,8 @@ export interface ScanOptions {
   vulns?: boolean;
   /** Ask each provider whether found keys still work and what they can reach. */
   verify?: boolean;
+  /** Apply `.tripwire-baseline.json` when present (default true). */
+  baseline?: boolean;
 }
 
 export interface ScanReport {
@@ -67,6 +71,11 @@ export async function scanTarget(input: string, opts: ScanOptions = {}, onStage?
       }
     }
     const { findings, samples, values } = mergeFindings(head, past.raws.filter((r) => !ignored(r.finding.file)), added);
+    const accepted = opts.baseline === false ? new Set<string>() : loadBaseline(dir);
+    for (const f of findings) {
+      f.fingerprint = fingerprint(f.rule, f.file, values.get(f.id) ?? "");
+      if (accepted.has(f.fingerprint)) f.baselined = true;
+    }
     if (opts.verify) {
       onStage?.("verify", { commitsScanned: past.commits, findings });
       await verifyFindings(findings, values, honeyKeyIds()).catch((err: Error) => warnings.push(`Key verification failed: ${err.message}`));

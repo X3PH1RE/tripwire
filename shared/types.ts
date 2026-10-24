@@ -130,6 +130,8 @@ export interface Finding {
   via?: string;
   /** Accepted in the baseline file: reported, but never blocks. */
   baselined?: boolean;
+  /** Hash of rule + file + value (never the value itself); what the baseline file stores. */
+  fingerprint?: string;
   /** Result of asking the provider whether the key works (`--verify`). */
   verify?: Verification;
 }

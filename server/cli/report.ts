@@ -1,4 +1,5 @@
 import type { Finding, Severity, VulnPackage } from "../../shared/types";
+import { CONFIDENCE_RANK, type Confidence } from "../detect/schema";
 import { blastHops } from "../graph";
 import type { ScanReport } from "../real/core";
 
@@ -8,6 +9,8 @@ export const RANK: Record<Severity, number> = { UNKNOWN: 0, LOW: 1, MODERATE: 2,
 export interface Policy {
   secrets: boolean;
   vulns: Severity | "none";
+  /** Findings below this confidence are reported but never block (default: everything blocks). */
+  minConfidence?: Confidence;
 }
 
 export interface Verdict {
@@ -17,9 +20,10 @@ export interface Verdict {
   blockingVulns: VulnPackage[];
 }
 
-/** In diff mode only secrets the change adds block; otherwise every secret still in the code does. */
+/** In diff mode only secrets the change adds block; otherwise every secret still in the code does. Baselined findings and findings below `minConfidence` are reported but never block. */
 export function evaluate(r: ScanReport, policy: Policy): Verdict {
-  const active = r.findings.filter((f) => f.verify?.status !== "revoked" && f.verify?.status !== "honey");
+  const floor = CONFIDENCE_RANK[policy.minConfidence ?? "low"];
+  const active = r.findings.filter((f) => f.verify?.status !== "revoked" && f.verify?.status !== "honey" && !f.baselined && CONFIDENCE_RANK[f.confidence ?? "high"] >= floor);
   const candidates = r.diffBase ? active.filter((f) => f.isNew) : active.filter((f) => f.inHead);
   const blocking = policy.secrets ? candidates : [];
   const blockingVulns = policy.vulns === "none" ? [] : r.vulns.filter((v) => RANK[v.severity] >= RANK[policy.vulns as Severity]);
@@ -42,7 +46,7 @@ export function unlocks(r: ScanReport, f: Finding): string[] {
 }
 
 const VSTAT: Record<string, string> = { live: "**LIVE**", revoked: "revoked", honey: "honey", unverified: "unverified" };
-const status = (f: Finding) => [f.isNew ? "new" : f.inHead ? "in code" : "history", f.verify ? VSTAT[f.verify.status] : ""].filter(Boolean).join(" · ");
+const status = (f: Finding) => [f.isNew ? "new" : f.inHead ? "in code" : "history", f.baselined ? "baselined" : "", f.confidence && f.confidence !== "high" ? `${f.confidence} confidence` : "", f.verify ? VSTAT[f.verify.status] : ""].filter(Boolean).join(" · ");
 const reach = (r: ScanReport, f: Finding) => (f.verify?.access?.length ? f.verify.access.map((a) => a.label) : f.verify?.status === "revoked" || f.verify?.status === "honey" ? [] : unlocks(r, f));
 const order = (f: Finding) => (f.isNew ? 0 : f.inHead ? 1 : 2);
 const sorted = (fs: Finding[]) => [...fs].sort((a, b) => order(a) - order(b));
@@ -75,14 +79,14 @@ export function toMarkdown(r: ScanReport, v: Verdict, maxVulns = 15): string {
 export function toText(r: ScanReport, v: Verdict, color: boolean, maxVulns = 10): string {
   const c = (code: string) => (s: string) => (color ? `\x1b[${code}m${s}\x1b[0m` : s);
   const [red, yellow, green, dim, bold, cyan] = ["31", "33", "32", "2", "1", "36"].map(c);
-  const tone = (f: Finding) => (f.isNew ? red("NEW ") : f.inHead ? red("CODE") : yellow("HIST"));
+  const tone = (f: Finding) => (f.baselined ? dim("BASE") : f.isNew ? red("NEW ") : f.inHead ? red("CODE") : yellow("HIST"));
   const vtag = (f: Finding) => (!f.verify ? "" : f.verify.status === "live" ? ` ${red(bold("LIVE"))}` : f.verify.status === "revoked" ? ` ${green("revoked")}` : f.verify.status === "honey" ? ` ${cyan("honey")}` : ` ${dim("unverified")}`);
   const sev = (s: Severity) => (RANK[s] >= 3 ? red : RANK[s] === 2 ? yellow : dim)(s.padEnd(8));
   const out = ["", `${bold("Tripwire")}  ${r.repo ?? r.name}${r.branch ? dim(` (${r.branch})`) : ""}  ${dim(`${r.filesScanned} files · ${r.commitsScanned} commits · ${(r.durationMs / 1000).toFixed(1)}s`)}`, ""];
   out.push(bold(`Secrets (${r.findings.length})`));
   if (!r.findings.length) out.push(dim("  none found"));
   for (const f of sorted(r.findings)) {
-    out.push(`  ${tone(f)}  ${(f.variable ?? f.ruleLabel).padEnd(22)} ${cyan(`${f.file}:${f.line}`)}${f.inHead ? "" : dim(` @${f.commit}`)}  ${dim(f.ruleLabel)}${vtag(f)}`);
+    out.push(`  ${tone(f)}  ${(f.variable ?? f.ruleLabel).padEnd(22)} ${cyan(`${f.file}:${f.line}`)}${f.inHead ? "" : dim(` @${f.commit}`)}  ${dim(f.ruleLabel)}${f.confidence && f.confidence !== "high" ? dim(` [${f.confidence}]`) : ""}${f.via ? dim(` (${f.via})`) : ""}${vtag(f)}`);
     const u = reach(r, f);
     out.push(dim(`        ${f.preview}${f.verify?.identity ? `  as ${f.verify.identity}` : ""}${u.length ? `  → unlocks ${u.join(", ")}` : ""}`));
     if (f.verify?.note && f.verify.status !== "live") out.push(dim(`        ${f.verify.note}`));

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -121,4 +121,43 @@ test("canarytokens hits are parsed newest first", async () => {
   ]);
   assert.equal(hits[0].at, 1700000100000);
   assert.deepEqual(hits[1], { at: 1700000000500, ip: "1.2.3.4", location: "Kochi, IN", org: "AS1 Example", userAgent: "aws-cli/2", action: "ListBuckets" });
+});
+
+test("baseline accepts current findings; new ones still block; hashes only", async () => {
+  const dir = repo();
+  try {
+    let out = "";
+    assert.equal(await main(["baseline", dir], (s) => (out += s), () => undefined), 0);
+    assert.match(out, /Accepted 2 findings/);
+    const file = readFileSync(join(dir, ".tripwire-baseline.json"), "utf8");
+    assert.ok(!file.includes(STRIPE) && !file.includes("Pw9xQ2mZ7vL4"), "baseline stores hashes, never secrets");
+
+    const r = await scanTarget(dir, { vulns: false });
+    assert.equal(r.findings.every((f) => f.baselined), true);
+    assert.equal(evaluate(r, { secrets: true, vulns: "none" }).failed, false);
+    assert.equal(await main(["scan", dir, "--skip-vulns", "-q"], () => undefined, () => undefined), 0);
+    assert.equal(await main(["scan", dir, "--skip-vulns", "-q", "--no-baseline"], () => undefined, () => undefined), 1);
+
+    writeFileSync(join(dir, "api/new.js"), `const k = "${STRIPE.replace("Zq", "Cc")}";\n`);
+    const again = await scanTarget(dir, { vulns: false });
+    assert.equal(evaluate(again, { secrets: true, vulns: "none" }).blocking.length, 1, "a new secret is not baselined");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("min-confidence lets low-confidence findings through without hiding them", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tw-conf-"));
+  try {
+    writeFileSync(join(dir, "app.env"), `SESSION_SECRET=Hq8zTn3Lw9Rk2Vb7Xc4Mp6Ds1Fg5Jy0\n`);
+    const r = await scanTarget(dir, { vulns: false });
+    assert.equal(r.findings.length, 1);
+    assert.notEqual(r.findings[0].confidence, "high");
+    assert.equal(evaluate(r, { secrets: true, vulns: "none" }).failed, true);
+    assert.equal(evaluate(r, { secrets: true, vulns: "none", minConfidence: "high" }).failed, false);
+    assert.equal(await main(["scan", dir, "--skip-vulns", "-q", "--min-confidence", "high"], () => undefined, () => undefined), 0);
+    assert.equal(await main(["scan", dir, "--min-confidence", "nope"], () => undefined, () => undefined), 2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
