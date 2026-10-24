@@ -27,7 +27,8 @@ Because tracks 1 and 2 reward finishing the job, at least one action must be rea
 
 ## 2. Ground rules for the agents
 
-- Never use real credentials anywhere in the demo world. All keys are obviously fake (for example `FAKE_sk_live_...`).
+- Never use real credentials anywhere in the demo world. All keys are obviously fake and use the house format `tw_fake_<provider>_<random>` (for example `tw_fake_stripe_9f3k...`). Never use real provider prefixes such as `sk_live_`, `AKIA`, `ghp_` or `xoxb-`: GitHub push protection and partner secret scanning will block the push or alert the provider on a public repo.
+- The app never edits tracked files. `demo-world/` is a read-only template that is copied into a gitignored `runtime/` folder at server start and on reset. Every scan, honey plant, and rotation reads and writes `runtime/`.
 - One exception: a GitHub fine-grained token scoped to the single throwaway demo repo (contents and pull requests write only). It lives in a server environment variable, is never committed, and is never shown on screen.
 - Every incident is deterministic and triggered by a button. No live typing during the demo.
 - Prefer fewer features that look great over more features that look rough.
@@ -46,7 +47,7 @@ Every feature exists to serve one of these beats.
 | 2. Breach | 40s | Click "Simulate: Railway breach". Exposed secrets turn red and the red spreads outward. Click the leaked database key and the attack path animates across the graph to production. |
 | 3. Tripwire | 40s | Click "Simulate attacker" (or hand a judge a fake key). The decoy fires, an alert slides in with file, time and source. Danger scores rise on the real secrets stored in the same file. |
 | 4. Contain | 40s | Click "Contain". Secrets rotate in order of danger. Nodes flip red to green with a progress counter. Ends on an all-green graph and a time-to-contain number. |
-| 5. Zero-day | 30s | Click "Simulate new CVE". Vulnerable service highlights, the agent opens a real pull request on GitHub (switch to the browser tab to show it), and the timeline ticks from disclosed to found to patched. |
+| 5. Zero-day | 30s | Click "Simulate new CVE". Vulnerable service highlights, the agent opens a real pull request on GitHub (switch to the browser tab to show it), and the timeline ticks from disclosed to found to patch ready. |
 
 Closing line: "Breach to contained in under a minute, versus days by hand."
 
@@ -58,19 +59,26 @@ Closing line: "Breach to contained in under a minute, versus days by hand."
 - Back end: Node with Express (or Fastify) and TypeScript.
 - Live updates: Server-Sent Events from backend to front end.
 - Storage: one JSON file for the demo world plus in-memory state. No database needed.
-- LLM: one API call wrapper used for plain-language explanations and PR text. Must have a canned fallback response for each call so the demo never depends on the network.
+- LLM: canned text is the default for every explanation and PR body. An optional wrapper (enabled by an env var) asks an LLM for the same text and silently falls back to the canned version on any error or timeout (3s), so the network is never on the critical path.
+- Repo setup: npm workspaces (`server`, `web`, `shared`) with `concurrently`, so `npm run dev` starts both and the data model types live in `shared/`.
 
 Suggested layout:
 
 ```
 tripwire/
-  demo-world/          # the fake company repo that gets scanned
+  shared/
+    types.ts           # data model from section 5
+  demo-world/          # read-only template of the fake company repo
     acme-shop/
       web/.env
+      web/Dockerfile
       api/.env
+      api/Dockerfile   # PHP service, target of the CVE beat
       worker/.env
+      worker/Dockerfile
       .github/workflows/deploy.yml
     world.json         # nodes, secrets, and what unlocks what
+  runtime/             # gitignored working copy of demo-world, recreated on reset
   server/
     scanner.ts
     scoring.ts
@@ -106,6 +114,7 @@ interface GraphNode {
   version?: string;           // for services: runtime version, used by the CVE step
   status: "ok" | "exposed" | "attacked" | "rotating" | "rotated" | "patched";
   danger?: number;            // 0 to 100, computed
+  position: { x: number; y: number }; // hand-placed in world.json, never auto-laid-out
 }
 
 interface GraphEdge {
@@ -130,7 +139,8 @@ Nodes to include:
 
 - Services: web app, API, background worker, CI pipeline (GitHub Actions).
 - Resources: Postgres database, storage bucket, payment provider account, production deploy target.
-- Secrets (all fake): `DATABASE_URL` (provider railway), `STRIPE_KEY`, `CLOUD_ACCESS_KEY`, `DEPLOY_TOKEN`, `STORAGE_KEY`.
+- Secrets (all fake, `tw_fake_` format): `DATABASE_URL` (provider railway), `STRIPE_KEY`, `CLOUD_ACCESS_KEY`, `DEPLOY_TOKEN`, `STORAGE_KEY`.
+- The API service runs PHP (Dockerfile `FROM php:8.1-apache`) so the zero-day beat has a believable version bump. Web and worker run Node.
 
 Chains that must exist so the blast radius view is impressive:
 
@@ -141,7 +151,7 @@ Chains that must exist so the blast radius view is impressive:
 
 So one leaked database URL chains to production in four hops. This is the hero path of the demo.
 
-Write the fake `.env` and workflow files so a real pattern scanner would find the secrets. `world.json` holds the authoritative mapping so results are deterministic.
+Write the fake `.env` and workflow files so a real pattern scanner would find the secrets. `world.json` holds the authoritative mapping and hand-placed x/y positions for every node, so results and layout are deterministic.
 
 ## 7. Build steps
 
@@ -151,11 +161,11 @@ Each step lists the task, what to build, and a "Done when" check. Hand them to t
 
 Create the `demo-world/acme-shop` files and `world.json` as described in section 6.
 
-Done when: `world.json` describes every node, every secret, and every unlock or stored_in link, and the fake files contain the secrets at known file and line positions.
+Done when: `world.json` describes every node (with position), every secret, and every unlock or stored_in link, the fake files contain the secrets at known file and line positions, and no value matches a real provider key format.
 
 ### Step 2: Scanner (about 1.5 hours)
 
-Build `scanner.ts`. It walks the demo repo, finds secret-looking strings using regex patterns (known key prefixes, `KEY=`/`TOKEN=` assignments) plus a Shannon entropy check for long random values. For each hit, look up the matching secret in `world.json` to attach what it unlocks.
+Build `scanner.ts`. It walks the demo repo (`runtime/` by default), finds secret-looking strings using regex patterns (the `tw_fake_` prefix, `KEY=`/`TOKEN=`/`_URL=` assignments) plus a Shannon entropy check for long random values. For each hit, look up the matching secret in `world.json` to attach what it unlocks.
 
 Expose `GET /api/scan` returning secrets with file, line, provider and the resources each reaches.
 
@@ -171,13 +181,15 @@ Danger score per secret, computed in `scoring.ts`:
 
 - Base score from the highest sensitivity among reachable resources (production = 40, high = 30, medium = 15, low = 5).
 - Plus 10 per additional reachable resource, up to 30.
-- Plus 20 if the chain can reach production through stored secrets.
+- Plus 20 if the secret can reach production by any path (directly or through stored secrets).
 - Plus 15 if the secret's status is `exposed`.
 - Cap at 100.
 
-Color nodes by danger (green, amber, red) and show a small numeric badge on each secret.
+Expected starting scores: `DATABASE_URL` 80, `CLOUD_ACCESS_KEY` 70, `DEPLOY_TOKEN` 60, `STORAGE_KEY` 50, `STRIPE_KEY` 30, so the graph shows a visible range before the breach.
 
-Done when: the graph renders cleanly with no overlapping labels and every secret shows a score. Layout should be fixed or deterministic so it looks the same on every load.
+Color nodes by danger (green below 40, amber 40 to 69, red 70 and above) and show a small numeric badge on each secret.
+
+Done when: the graph renders cleanly with no overlapping labels and every secret shows a score. Node positions come from `world.json`, so it looks the same on every load.
 
 ### Step 4: Blast radius view (about 1.5 hours)
 
@@ -189,7 +201,7 @@ Done when: clicking `DEPLOY_TOKEN` or `DATABASE_URL` animates the multi-hop path
 
 ### Step 5: Honey secrets (about 1.5 hours)
 
-"Plant tripwires" button inserts 3 to 4 fake decoy secrets into the demo env and CI files (actually write them to the files) and adds them to the graph as decoy nodes with a distinct style, for example dashed outline and a small trap icon.
+"Plant tripwires" button inserts 3 to 4 fake decoy secrets into the env and CI files in `runtime/` (actually write them to the files) and adds them to the graph as decoy nodes with a distinct style, for example dashed outline and a small trap icon.
 
 "Simulate attacker" button picks a decoy and fires an event via SSE. The alert shows: decoy name, file it was planted in, timestamp, and a fake source (for example an IP and city). Then it raises the danger score of every real secret stored in the same file, with a visible score animation.
 
@@ -207,7 +219,7 @@ Done when: one click produces the red spread animation and updated scores.
 
 1. Status goes to `rotating` (pulsing amber).
 2. Generate a new fake value.
-3. Update the value in the demo file.
+3. Update the value in the file in `runtime/`.
 4. Status goes to `rotated`, node flips green.
 5. Progress counter ticks (for example 3 of 5).
 
@@ -226,8 +238,8 @@ Add a "Simulate new CVE" button using a PHP-style remote code execution vulnerab
 1. The agent checks each service's `version` against the affected range and highlights vulnerable ones on the graph.
 2. It creates a branch on the demo repo through the GitHub API and commits a real version bump to the right file.
 3. It opens a real pull request with an LLM-written title and description (canned fallback if the LLM call fails).
-4. The UI shows the PR link and a timeline: Disclosed, Found, PR opened, Patched, each with a timestamp. The PR number and link are real and clickable.
-5. On "Patched", the service node turns green with a badge. Either merge the PR automatically through the API, or leave it open and say a human reviews it. Pick one and stay consistent.
+4. The UI shows the PR link and a timeline: Disclosed, Found, PR opened, Patch ready, each with a timestamp. The PR number and link are real and clickable.
+5. The PR is left open for human review (never auto-merged, so `main` on the demo repo never changes). The final timeline step is "Patch ready", and the service node turns green with a "PR #N" badge.
 
 Fallbacks: if the GitHub API call fails, show a pre-opened PR from a dry run and mark the timeline as replayed. Write a small reset routine that closes the old PR and deletes the branch so the demo can run repeatedly.
 
@@ -237,7 +249,7 @@ Done when: one click opens a real PR on GitHub within 30 seconds, the link works
 
 - Smooth animations for path drawing and color flips.
 - Large readable counters and fonts, since this will be on a projector.
-- One-click reset that returns files, graph, scores and timeline to the starting state.
+- One-click reset that re-copies `demo-world/` into `runtime/` and returns graph, scores and timeline to the starting state.
 - A "Run full demo" mode that is optional, but each button must also work on its own.
 - Run the full five-beat demo three times in a row without reloading.
 - Record a backup video of a clean run.
@@ -278,7 +290,7 @@ If time runs short, cut in this order: the second realistic rotation first, then
 
 - Present on a laptop, with a phone or second device ready if you hand a judge the fake key.
 - Keep the narration short. Let the animations carry it.
-- Lead with the problem (real recent breaches like Railway and the PHP flaws), then show the product.
+- Lead with the problem, then show the product. Only name a real provider breach (for example Railway) or a real PHP CVE on stage if you can cite the actual incident. Otherwise say "a hypothetical provider breach" and keep the fake CVE ID clearly fake.
 - Be honest about what is real and what is scripted. Real: the scanner, scoring, graph logic, and the pull request opened on GitHub. Scripted: the breach, the honey key use, and the secret rotation.
 - Have one answer ready for "what would make this production ready": real provider integrations for rotation, real scanning of connected repos via the GitHub API, and real honey token services that call home when used.
 
