@@ -32,7 +32,7 @@ npm run dev                  # server :3001, web http://localhost:5173
 Switch to **Scan a repo**, paste a GitHub URL or `owner/name`, and press **Scan repository**. Tripwire:
 
 1. Shallow-clones the repo (last 300 commits; `SCAN_HISTORY_COMMITS` to change).
-2. Scans every text file for secrets: AWS, GitHub, GitLab, Stripe, Slack, Google, OpenAI, Anthropic, SendGrid, Twilio, npm, private keys, database URLs with passwords, plus high-entropy `*_KEY/TOKEN/SECRET` assignments. Placeholders and `${VAR}` references are ignored.
+2. Scans every text file for secrets with 230+ provider rules (see Detection engine below), database URLs with passwords, and high-entropy `*_KEY/TOKEN/SECRET` assignments. Placeholders and `${VAR}` references are ignored.
 3. Scans git history, so secrets that were deleted but are still in old commits show up marked `history`.
 4. Builds the attack graph from the repo: folders with a manifest become services, findings become secrets, key names and token types decide what each secret unlocks, and `${{ secrets.X }}` in workflows are linked through repo write access.
 5. Checks dependencies (`package-lock.json`, `package.json`, `requirements*.txt`, `go.mod`, `composer.lock`, `Gemfile.lock`) against [OSV.dev](https://osv.dev).
@@ -50,13 +50,33 @@ npx github:X3PH1RE/tripwire scan owner/repo        # any GitHub repo
 npx github:X3PH1RE/tripwire scan . --diff origin/main --fail-on-vulns high
 ```
 
-Exits `1` when something blocks, `0` when clean, `2` on usage errors. By default every secret still in the code blocks; with `--diff <base>` only secrets added since `<base>` block, so existing debt doesn't fail every PR. Secrets found only in history are reported but never block (rotate them). Other flags: `--history <n>`, `--skip-vulns`, `--no-fail-secrets`, `--json <file|->`, `--markdown <file>`. Inside this repo: `npm run scan -- <target>`.
+Exits `1` when something blocks, `0` when clean, `2` on usage errors. `tripwire baseline [path]` accepts the current findings (see below). By default every secret still in the code blocks; with `--diff <base>` only secrets added since `<base>` block, so existing debt doesn't fail every PR. Secrets found only in history are reported but never block (rotate them). Other flags: `--min-confidence <low|medium|high>`, `--no-baseline`, `--history <n>`, `--skip-vulns`, `--no-fail-secrets`, `--json <file|->`, `--markdown <file>`. Inside this repo: `npm run scan -- <target>`.
 
 False positives: add `tripwire:ignore` (or `gitleaks:allow`) on the line, or globs to `.tripwireignore` (`fixtures/`, `*.test.ts`, `docs/**/*.md`).
 
 ### Live keys and real reach (`--verify`)
 
 With `--verify` (CLI), `verify: true` (Action) or **Check if keys are live** (UI), Tripwire makes one read-only "who am I" call per key to its own provider: AWS STS + IAM, GitHub, Stripe, Slack, OpenAI, Anthropic, SendGrid and npm. Each secret is marked `live`, `revoked` or `unverified`. For live keys the graph shows what the provider says the key reaches (AWS account and IAM policies, GitHub repos it can write to, Stripe account, Slack workspace and scopes) instead of a guess from the variable name. Revoked keys and Tripwire's own decoys stop failing the check. Off by default because it uses the found key.
+
+### Detection engine
+
+Rules live in data, not code. `server/detect/` loads two packs: Tripwire's own rules (`rules/tripwire.ts`, written from each provider's token format) and the Gitleaks default pack (`rules/gitleaks.json`, 219 rules, MIT), regenerated with `npm run import:gitleaks`. Tripwire's rules win when both match the same value, and the generic `generic-api-key` rule is replaced by Tripwire's own.
+
+- **Fast.** One Aho-Corasick pass per file finds every rule keyword at once; regexes only run on lines that contain one.
+- **Fewer false positives.** Per-rule entropy, allowlists (regexes, stopwords, paths), placeholders, UUIDs, digests, password hashes (bcrypt, argon2), version strings, file names, `%s` templates and attribute chains are all rejected. GitHub tokens are checked against their built-in checksum and JWTs must have a real header.
+- **Confidence.** Every finding is `high` (fixed provider format), `medium` or `low` (name-based). Examples in docs and tests, and tutorial passwords like `redis://username:password@...`, report at `low`. `--min-confidence high` fails the check only on `high`; the rest are still listed.
+- **Hidden secrets.** Values inside base64, URL-encoding and hex (up to two layers) are decoded and rescanned, including Kubernetes `password: <base64>`. Those findings say how they were found. Private keys count only as a full BEGIN..END block, including keys escaped inside a JSON string.
+- **Baseline.** `tripwire baseline` writes `.tripwire-baseline.json`: hashes of the current findings, never the secrets. Those findings stay in the report but stop failing the check; a new secret still fails. `--no-baseline` ignores the file.
+
+#### Benchmark
+
+```bash
+npm run bench:fetch   # downloads Gitleaks 8.30.1 into bench/.cache (once)
+npm run bench         # scores Tripwire and Gitleaks, writes bench/RESULTS.md
+npm run bench -- --gate   # exit 1 if Tripwire drops below 95% precision or recall
+```
+
+[bench/RESULTS.md](bench/RESULTS.md) has the latest numbers. The corpus (`bench/corpus.mts`) is written by this project, so it favours Tripwire's own rules: treat it as a regression gate and a parity check, not an independent ranking. Add a case whenever a real repo produces a miss or a false positive; several of the filters above came from scanning Flask, Django and NodeGoat.
 
 ### Honey secrets
 
@@ -69,7 +89,7 @@ A honey secret is a real AWS key from [Canarytokens](https://canarytokens.org) w
 
 ### GitHub Action
 
-Copy [examples/tripwire.yml](examples/tripwire.yml) to `.github/workflows/tripwire.yml`. On pull requests it fails only when the PR adds a secret, annotates the offending lines, and keeps one summary comment up to date with the secrets, what each unlocks, and vulnerable dependencies. On pushes it fails while any secret is in the code. Inputs: `path`, `fail-on-secrets`, `fail-on-vulns`, `comment`, `history`, `token`. Outputs: `secrets`, `new-secrets`, `vulns`, `failed`.
+Copy [examples/tripwire.yml](examples/tripwire.yml) to `.github/workflows/tripwire.yml`. On pull requests it fails only when the PR adds a secret, annotates the offending lines, and keeps one summary comment up to date with the secrets, what each unlocks, and vulnerable dependencies. On pushes it fails while any secret is in the code. Inputs: `path`, `fail-on-secrets`, `fail-on-vulns`, `comment`, `history`, `verify`, `min-confidence`, `baseline`, `token`. Outputs: `secrets`, `new-secrets`, `vulns`, `failed`.
 
 The action runs `action/action.mjs`, a self-contained bundle (no install step). Rebuild it with `npm run build:cli` after changing `server/real` or `server/cli`.
 

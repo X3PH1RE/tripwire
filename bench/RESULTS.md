@@ -5,8 +5,8 @@ A case counts as detected when the tool reports anything in its file. A negative
 
 | Tool | Version | Precision | Recall | F1 | Missed | False positives | Time |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Tripwire | this repo | 100.0% | 100.0% | 100.0% | 0/110 | 0/63 | 389 ms |
-| Gitleaks | 8.30.1 | 96.1% | 89.1% | 92.5% | 12/110 | 4/63 | 1136 ms |
+| Tripwire | this repo | 100.0% | 100.0% | 100.0% | 0/110 | 0/63 | 414 ms |
+| Gitleaks | 8.30.1 | 96.1% | 89.1% | 92.5% | 12/110 | 4/63 | 1223 ms |
 
 ## Tripwire
 
