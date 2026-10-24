@@ -161,3 +161,42 @@ test("min-confidence lets low-confidence findings through without hiding them", 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("contain: dry run plans without touching the provider; --apply revokes and re-checks", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tw-contain-cli-"));
+  const home = mkdtempSync(join(tmpdir(), "tw-home-"));
+  const realFetch = globalThis.fetch;
+  const token = ["ghp", "Zq8Xw3Rt6Yu1Io4Pa7Sd0Fg2Hj5Kl9Mn3BvQ7"].join("_");
+  const seen: string[] = [];
+  let revoked = false;
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    seen.push(`${init?.method ?? "GET"} ${url}`);
+    if (url.endsWith("/credentials/revoke")) return (revoked = true), new Response("{}", { status: 202 });
+    if (url === "https://api.github.com/user") return revoked ? new Response("{}", { status: 401 }) : new Response(JSON.stringify({ login: "octocat" }), { status: 200 });
+    if (url.includes("/user/repos")) return new Response("[]", { status: 200 });
+    throw new Error(`unexpected request ${url}`);
+  }) as typeof fetch;
+  process.env.TRIPWIRE_HOME = home;
+  try {
+    writeFileSync(join(dir, ".env"), `GITHUB_TOKEN=${token}\n`);
+    let out = "";
+    assert.equal(await main(["contain", dir, "-q"], (s) => (out += s), () => undefined), 0);
+    assert.match(out, /dry run/);
+    assert.match(out, /WOULD REVOKE/);
+    assert.ok(!out.includes(token) && !out.includes(token.slice(8)), "the plan never prints the secret");
+    assert.ok(!seen.some((s) => s.includes("credentials/revoke")), "dry run makes no write call");
+
+    out = "";
+    assert.equal(await main(["contain", dir, "--apply", "-q"], (s) => (out += s), () => undefined), 0);
+    assert.match(out, /REVOKED/);
+    assert.match(out, /1 revoked/);
+    assert.ok(seen.some((s) => s === "POST https://api.github.com/credentials/revoke"));
+    assert.ok(!readFileSync(join(home, "contain-log.jsonl"), "utf8").includes(token.slice(8)), "log has no secret");
+  } finally {
+    globalThis.fetch = realFetch;
+    delete process.env.TRIPWIRE_HOME;
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});

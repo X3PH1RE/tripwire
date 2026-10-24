@@ -8,7 +8,8 @@ import { REVOKERS } from "./providers";
 
 export { buildPlan } from "./plan";
 
-export const CONTAIN_LOG = join(process.env.TRIPWIRE_HOME ?? join(homedir(), ".tripwire"), "contain-log.jsonl");
+/** Resolved per call so TRIPWIRE_HOME can be set after import. */
+export const containLog = () => join(process.env.TRIPWIRE_HOME ?? join(homedir(), ".tripwire"), "contain-log.jsonl");
 
 export interface ContainInput {
   findings: Finding[];
@@ -25,7 +26,7 @@ export interface ContainOptions {
   only?: string[];
   /** Wait before re-checking a revoked key, for providers that apply revocation a moment later. */
   delayMs?: number;
-  /** Where actions are recorded; defaults to ~/.tripwire/contain-log.jsonl. Pass `false` to skip. */
+  /** Where actions are recorded; defaults to ~/.tripwire/contain-log.jsonl (or $TRIPWIRE_HOME). Pass `false` to skip. */
   logFile?: string | false;
 }
 
@@ -40,7 +41,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function record(file: string | false | undefined, entry: Record<string, unknown>): void {
   if (file === false) return;
-  const path = file ?? CONTAIN_LOG;
+  const path = file ?? containLog();
   try {
     mkdirSync(dirname(path), { recursive: true });
     appendFileSync(path, JSON.stringify({ at: new Date().toISOString(), ...entry }) + "\n", { mode: 0o600 });
