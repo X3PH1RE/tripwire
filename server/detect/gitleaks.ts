@@ -122,7 +122,7 @@ const allowlist = (a: TomlAllowlist): AllowlistDef => ({
 });
 
 export function importGitleaks(toml: string): Pack {
-  const doc = parse(toml) as { allowlist?: TomlAllowlist; allowlists?: TomlAllowlist[]; rules: (Record<string, any> & { allowlists?: TomlAllowlist[] })[] };
+  const doc = parse(toml) as unknown as { allowlist?: TomlAllowlist; allowlists?: TomlAllowlist[]; rules: (Record<string, any> & { allowlists?: TomlAllowlist[] })[] };
   const rules: RuleDef[] = [];
   for (const r of doc.rules) {
     if (SKIP.has(r.id) || !r.regex) continue;
