@@ -71,7 +71,7 @@ Using the [pre-commit](https://pre-commit.com) framework instead? Add this to `.
 ```yaml
 repos:
   - repo: https://github.com/X3PH1RE/tripwire
-    rev: v1.0.0
+    rev: v1.0.1
     hooks:
       - id: tripwire
 ```
