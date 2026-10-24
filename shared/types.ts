@@ -13,6 +13,7 @@ export interface GraphNode {
   version?: string;
   status: NodeStatus;
   danger?: number;
+  badge?: string;
   position: { x: number; y: number };
 }
 
@@ -25,9 +26,11 @@ export interface GraphEdge {
 
 export interface Incident {
   id: string;
-  kind: "breach" | "honey" | "cve";
+  kind: "breach" | "honey" | "cve" | "contain" | "info";
   at: number;
+  title: string;
   summary: string;
+  details?: { label: string; value: string }[];
   affectedNodeIds: string[];
 }
 
@@ -51,4 +54,53 @@ export interface ScanHit {
   nodeId?: string;
   provider?: string;
   reaches: { id: string; label: string; sensitivity?: GraphNode["sensitivity"] }[];
+}
+
+export interface Rotation {
+  nodeId: string;
+  label: string;
+  before: string;
+  after: string;
+}
+
+export interface CveStep {
+  key: "disclosed" | "found" | "pr" | "ready";
+  label: string;
+  at?: number;
+}
+
+export interface CveState {
+  status: "idle" | "running" | "done" | "failed";
+  cveId?: string;
+  summary?: string;
+  steps: CveStep[];
+  prUrl?: string;
+  prNumber?: number;
+  replayed?: boolean;
+  note?: string;
+}
+
+export interface DemoState {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  incidents: Incident[];
+  breach: { provider?: string; startedAt?: number };
+  honey: { planted: boolean; attacks: number };
+  containment: {
+    status: "idle" | "running" | "done";
+    startedAt?: number;
+    finishedAt?: number;
+    total: number;
+    done: number;
+    rotations: Rotation[];
+  };
+  cve: CveState;
+}
+
+export interface BlastResult {
+  nodeId: string;
+  hops: { edges: string[]; nodes: string[] }[];
+  explanation: string;
+  worstCase: string;
+  source: "llm" | "canned";
 }
