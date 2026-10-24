@@ -1,4 +1,6 @@
-# Tripwire
+<p align="center">
+  <img src="assets/banner.svg" alt="Tripwire: find the leaked key, see what it unlocks, kill it" width="100%" />
+</p>
 
 A repo security agent with a visual attack graph. It scans a repo for secrets, maps their blast radius, plants honey secrets as tripwires, contains a breach by rotating keys highest-danger first, and responds to new CVEs by opening a real patch PR.
 
@@ -31,7 +33,7 @@ npm run dev                  # server :3001, web http://localhost:5173
 
 Switch to **Scan a repo**, paste a GitHub URL or `owner/name`, and press **Scan repository**. Tripwire:
 
-1. Shallow-clones the repo (last 300 commits; `SCAN_HISTORY_COMMITS` to change).
+1. Shallow-clones the repo (last 300 commits; `SCAN_HISTORY_COMMITS` to change). Private GitHub repos are cloned with `GITHUB_TOKEN`, or with your `gh auth login` session if that is unset. Big repositories can take minutes on a slow connection; the limit is 10 minutes (`CLONE_TIMEOUT_MS`).
 2. Scans every text file for secrets with 230+ provider rules (see Detection engine below), database URLs with passwords, and high-entropy `*_KEY/TOKEN/SECRET` assignments. Placeholders and `${VAR}` references are ignored.
 3. Scans git history, so secrets that were deleted but are still in old commits show up marked `history`.
 4. Builds the attack graph from the repo: folders with a manifest become services, findings become secrets, key names and token types decide what each secret unlocks, and `${{ secrets.X }}` in workflows are linked through repo write access.

@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640" role="img" aria-label="Tripwire">
+  <title>Tripwire</title>
+  <defs>
+    <linearGradient id="tw-bg" x1="8" y1="4" x2="56" y2="60" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fb3a5d" />
+      <stop offset="1" stop-color="#b30f38" />
+    </linearGradient>
+    <radialGradient id="tw-glow" cx="0.5" cy="0.42" r="0.6">
+      <stop offset="0" stop-color="#f43f5e" stop-opacity="0.24" />
+      <stop offset="1" stop-color="#f43f5e" stop-opacity="0" />
+    </radialGradient>
+    <linearGradient id="tw-wire" x1="0" y1="0" x2="1280" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f43f5e" stop-opacity="0" />
+      <stop offset="0.2" stop-color="#f43f5e" stop-opacity="0.8" />
+      <stop offset="0.8" stop-color="#f43f5e" stop-opacity="0.8" />
+      <stop offset="1" stop-color="#f43f5e" stop-opacity="0" />
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="640" fill="#0a0a0c" />
+  <rect width="1280" height="640" fill="url(#tw-glow)" />
+  <path d="M0 160H1280M0 320H1280M0 480H1280M160 0V640M320 0V640M480 0V640M640 0V640M800 0V640M960 0V640M1120 0V640" stroke="#fff" stroke-opacity="0.025" />
+
+  <path d="M0 472H1280" stroke="url(#tw-wire)" stroke-width="2" />
+  <circle cx="640" cy="472" r="22" fill="none" stroke="#f43f5e" stroke-opacity="0.45" />
+  <circle cx="640" cy="472" r="8" fill="#f43f5e" />
+  <circle cx="64" cy="472" r="5" fill="#f43f5e" fill-opacity="0.6" />
+  <circle cx="1216" cy="472" r="5" fill="#f43f5e" fill-opacity="0.6" />
+
+  <g transform="translate(544 72) scale(3)">
+    <rect width="64" height="64" rx="15" fill="url(#tw-bg)" />
+    <rect x="0.75" y="0.75" width="62.5" height="62.5" rx="14.25" fill="none" stroke="#fff" stroke-opacity="0.16" stroke-width="1.5" />
+    <g transform="translate(9.2 8.6) scale(1.9)" fill="none" stroke="#fff" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6l8-3z" stroke-width="1.9" />
+      <path d="M3 12.5h18" stroke-width="1.1" stroke-opacity="0.9" />
+      <circle cx="12" cy="12.5" r="3.5" stroke-width="0.7" stroke-opacity="0.55" />
+      <circle cx="12" cy="12.5" r="1.7" fill="#fff" stroke="none" />
+      <circle cx="3" cy="12.5" r="1" fill="#fff" stroke="none" />
+      <circle cx="21" cy="12.5" r="1" fill="#fff" stroke="none" />
+    </g>
+  </g>
+
+  <g font-family="Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" text-anchor="middle">
+    <text x="640" y="376" font-size="104" font-weight="700" letter-spacing="-3" fill="#fafafa">Tripwire</text>
+    <text x="640" y="430" font-size="30" fill="#a1a1aa">Find the leaked key. See what it unlocks. Kill it.</text>
+    <text x="640" y="570" font-size="22" fill="#71717a">secret scanning · live key checks · revocation · pre-commit hook · GitHub Action</text>
+  </g>
+</svg>
