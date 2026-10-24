@@ -1,0 +1,298 @@
+{
+  "company": "acme-shop",
+  "root": "demo-world/acme-shop",
+  "notes": {
+    "res-postgres": "Table integrations.cloud_credentials holds CLOUD_ACCESS_KEY",
+    "res-uploads-bucket": "Object ci/deploy.env holds DEPLOY_TOKEN"
+  },
+  "heroPath": [
+    "sec-database-url",
+    "res-postgres",
+    "sec-cloud-access-key",
+    "res-uploads-bucket",
+    "sec-deploy-token",
+    "res-prod-deploy"
+  ],
+  "nodes": [
+    {
+      "id": "repo-acme-shop",
+      "type": "repo",
+      "label": "acme-shop",
+      "status": "ok",
+      "position": {
+        "x": 0,
+        "y": 320
+      }
+    },
+    {
+      "id": "svc-web",
+      "type": "service",
+      "label": "Storefront (web)",
+      "version": "node 20.11.0",
+      "file": "web/Dockerfile",
+      "status": "ok",
+      "position": {
+        "x": 240,
+        "y": 40
+      }
+    },
+    {
+      "id": "svc-api",
+      "type": "service",
+      "label": "API",
+      "version": "php 8.1.2",
+      "file": "api/Dockerfile",
+      "status": "ok",
+      "position": {
+        "x": 240,
+        "y": 240
+      }
+    },
+    {
+      "id": "svc-worker",
+      "type": "service",
+      "label": "Worker",
+      "version": "node 20.11.0",
+      "file": "worker/Dockerfile",
+      "status": "ok",
+      "position": {
+        "x": 240,
+        "y": 440
+      }
+    },
+    {
+      "id": "svc-ci",
+      "type": "service",
+      "label": "CI (GitHub Actions)",
+      "file": ".github/workflows/deploy.yml",
+      "status": "ok",
+      "position": {
+        "x": 240,
+        "y": 600
+      }
+    },
+    {
+      "id": "sec-storage-key",
+      "type": "secret",
+      "label": "STORAGE_KEY",
+      "provider": "cloud",
+      "file": "web/.env",
+      "line": 4,
+      "status": "ok",
+      "position": {
+        "x": 520,
+        "y": 40
+      }
+    },
+    {
+      "id": "sec-stripe-key",
+      "type": "secret",
+      "label": "STRIPE_KEY",
+      "provider": "stripe",
+      "file": "api/.env",
+      "line": 5,
+      "status": "ok",
+      "position": {
+        "x": 520,
+        "y": 180
+      }
+    },
+    {
+      "id": "sec-database-url",
+      "type": "secret",
+      "label": "DATABASE_URL",
+      "provider": "railway",
+      "file": "api/.env",
+      "line": 4,
+      "status": "ok",
+      "position": {
+        "x": 520,
+        "y": 300
+      }
+    },
+    {
+      "id": "sec-cloud-access-key",
+      "type": "secret",
+      "label": "CLOUD_ACCESS_KEY",
+      "provider": "cloud",
+      "file": "worker/.env",
+      "line": 4,
+      "status": "ok",
+      "position": {
+        "x": 520,
+        "y": 440
+      }
+    },
+    {
+      "id": "sec-deploy-token",
+      "type": "secret",
+      "label": "DEPLOY_TOKEN",
+      "provider": "github",
+      "file": ".github/workflows/deploy.yml",
+      "line": 11,
+      "status": "ok",
+      "position": {
+        "x": 520,
+        "y": 600
+      }
+    },
+    {
+      "id": "res-assets-bucket",
+      "type": "resource",
+      "label": "Assets bucket",
+      "provider": "cloud",
+      "sensitivity": "medium",
+      "status": "ok",
+      "position": {
+        "x": 820,
+        "y": 40
+      }
+    },
+    {
+      "id": "res-payments",
+      "type": "resource",
+      "label": "Payments account",
+      "provider": "stripe",
+      "sensitivity": "high",
+      "status": "ok",
+      "position": {
+        "x": 820,
+        "y": 180
+      }
+    },
+    {
+      "id": "res-postgres",
+      "type": "resource",
+      "label": "Postgres (customers)",
+      "provider": "railway",
+      "sensitivity": "high",
+      "status": "ok",
+      "position": {
+        "x": 820,
+        "y": 300
+      }
+    },
+    {
+      "id": "res-uploads-bucket",
+      "type": "resource",
+      "label": "Uploads bucket",
+      "provider": "cloud",
+      "sensitivity": "high",
+      "status": "ok",
+      "position": {
+        "x": 820,
+        "y": 440
+      }
+    },
+    {
+      "id": "res-prod-deploy",
+      "type": "resource",
+      "label": "Production deploy",
+      "provider": "github",
+      "sensitivity": "production",
+      "status": "ok",
+      "position": {
+        "x": 820,
+        "y": 600
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "repo-acme-shop--stored_in--svc-web",
+      "from": "repo-acme-shop",
+      "to": "svc-web",
+      "kind": "stored_in"
+    },
+    {
+      "id": "repo-acme-shop--stored_in--svc-api",
+      "from": "repo-acme-shop",
+      "to": "svc-api",
+      "kind": "stored_in"
+    },
+    {
+      "id": "repo-acme-shop--stored_in--svc-worker",
+      "from": "repo-acme-shop",
+      "to": "svc-worker",
+      "kind": "stored_in"
+    },
+    {
+      "id": "repo-acme-shop--stored_in--svc-ci",
+      "from": "repo-acme-shop",
+      "to": "svc-ci",
+      "kind": "stored_in"
+    },
+    {
+      "id": "svc-web--stored_in--sec-storage-key",
+      "from": "svc-web",
+      "to": "sec-storage-key",
+      "kind": "stored_in"
+    },
+    {
+      "id": "svc-api--stored_in--sec-stripe-key",
+      "from": "svc-api",
+      "to": "sec-stripe-key",
+      "kind": "stored_in"
+    },
+    {
+      "id": "svc-api--stored_in--sec-database-url",
+      "from": "svc-api",
+      "to": "sec-database-url",
+      "kind": "stored_in"
+    },
+    {
+      "id": "svc-worker--stored_in--sec-cloud-access-key",
+      "from": "svc-worker",
+      "to": "sec-cloud-access-key",
+      "kind": "stored_in"
+    },
+    {
+      "id": "svc-ci--stored_in--sec-deploy-token",
+      "from": "svc-ci",
+      "to": "sec-deploy-token",
+      "kind": "stored_in"
+    },
+    {
+      "id": "sec-storage-key--unlocks--res-assets-bucket",
+      "from": "sec-storage-key",
+      "to": "res-assets-bucket",
+      "kind": "unlocks"
+    },
+    {
+      "id": "sec-stripe-key--unlocks--res-payments",
+      "from": "sec-stripe-key",
+      "to": "res-payments",
+      "kind": "unlocks"
+    },
+    {
+      "id": "sec-database-url--unlocks--res-postgres",
+      "from": "sec-database-url",
+      "to": "res-postgres",
+      "kind": "unlocks"
+    },
+    {
+      "id": "res-postgres--stored_in--sec-cloud-access-key",
+      "from": "res-postgres",
+      "to": "sec-cloud-access-key",
+      "kind": "stored_in"
+    },
+    {
+      "id": "sec-cloud-access-key--unlocks--res-uploads-bucket",
+      "from": "sec-cloud-access-key",
+      "to": "res-uploads-bucket",
+      "kind": "unlocks"
+    },
+    {
+      "id": "res-uploads-bucket--stored_in--sec-deploy-token",
+      "from": "res-uploads-bucket",
+      "to": "sec-deploy-token",
+      "kind": "stored_in"
+    },
+    {
+      "id": "sec-deploy-token--unlocks--res-prod-deploy",
+      "from": "sec-deploy-token",
+      "to": "res-prod-deploy",
+      "kind": "unlocks"
+    }
+  ]
+}

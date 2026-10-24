@@ -138,7 +138,7 @@ interface Incident {
 Nodes to include:
 
 - Services: web app, API, background worker, CI pipeline (GitHub Actions).
-- Resources: Postgres database, storage bucket, payment provider account, production deploy target.
+- Resources: Postgres database, uploads storage bucket (high), assets bucket (medium, unlocked by `STORAGE_KEY`), payment provider account, production deploy target.
 - Secrets (all fake, `tw_fake_` format): `DATABASE_URL` (provider railway), `STRIPE_KEY`, `CLOUD_ACCESS_KEY`, `DEPLOY_TOKEN`, `STORAGE_KEY`.
 - The API service runs PHP (Dockerfile `FROM php:8.1-apache`) so the zero-day beat has a believable version bump. Web and worker run Node.
 
@@ -185,7 +185,7 @@ Danger score per secret, computed in `scoring.ts`:
 - Plus 15 if the secret's status is `exposed`.
 - Cap at 100.
 
-Expected starting scores: `DATABASE_URL` 80, `CLOUD_ACCESS_KEY` 70, `DEPLOY_TOKEN` 60, `STORAGE_KEY` 50, `STRIPE_KEY` 30, so the graph shows a visible range before the breach.
+Expected starting scores: `DATABASE_URL` 80, `CLOUD_ACCESS_KEY` 70, `DEPLOY_TOKEN` 60, `STRIPE_KEY` 30, `STORAGE_KEY` 15, so the graph shows a visible range before the breach.
 
 Color nodes by danger (green below 40, amber 40 to 69, red 70 and above) and show a small numeric badge on each secret.
 
