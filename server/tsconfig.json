@@ -7,7 +7,8 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "noEmit": true,
-    "types": ["node"]
+    "types": ["node"],
+    "resolveJsonModule": true
   },
-  "include": ["*.ts", "real/*.ts", "cli/*.ts", "../shared/*.ts"]
+  "include": ["*.ts", "real/*.ts", "cli/*.ts", "detect/**/*.ts", "../shared/*.ts"]
 }

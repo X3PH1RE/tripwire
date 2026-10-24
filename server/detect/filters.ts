@@ -92,7 +92,7 @@ export function allowed(a: CompiledAllowlist, ctx: { secret: string; match: stri
 const B62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
 let crcTable: Uint32Array | undefined;
-function crc32(s: string): number {
+export function crc32(s: string): number {
   if (!crcTable) {
     crcTable = new Uint32Array(256);
     for (let n = 0; n < 256; n++) {
@@ -106,7 +106,7 @@ function crc32(s: string): number {
   return (c ^ 0xffffffff) >>> 0;
 }
 
-function toBase62(n: number, width: number): string {
+export function toBase62(n: number, width: number): string {
   let out = "";
   while (n > 0) {
     out = B62[n % 62] + out;
