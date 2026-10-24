@@ -157,14 +157,16 @@ export async function verifyOne(f: Finding, value: string, context: Map<string, 
 
 export const VERIFIABLE = new Set(["aws", "github", "stripe", "stripe-test", "slack", "openai", "anthropic", "sendgrid", "npm"]);
 
+/** The AWS secret access key that goes with this key ID: the closest one in the same file, else the only one in the repo. */
+export function awsSecretFor(findings: Finding[], f: Finding): Finding | undefined {
+  const secrets = findings.filter((s) => s.rule === "aws-secret-key");
+  const near = secrets.filter((s) => s.file === f.file).sort((a, b) => Math.abs(a.line - f.line) - Math.abs(b.line - f.line))[0];
+  return near ?? (secrets.length === 1 ? secrets[0] : undefined);
+}
+
 /** Fills in `finding.verify` in place. `honeyIds` are Tripwire's own decoys, which must never be used. */
 export async function verifyFindings(findings: Finding[], values: Map<string, string>, honeyIds: Set<string> = new Set()): Promise<void> {
-  const secrets = findings.filter((f) => f.rule === "aws-secret-key");
-  // Pair each AWS key ID with the closest secret in the same file, else the only secret in the repo.
-  const pairFor = (f: Finding) => {
-    const near = secrets.filter((s) => s.file === f.file).sort((a, b) => Math.abs(a.line - f.line) - Math.abs(b.line - f.line))[0];
-    return near ?? (secrets.length === 1 ? secrets[0] : undefined);
-  };
+  const pairFor = (f: Finding) => awsSecretFor(findings, f);
   const queue = findings.filter((f) => VERIFIABLE.has(f.provider));
   let i = 0;
   const worker = async () => {

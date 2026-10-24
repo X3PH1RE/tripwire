@@ -201,6 +201,39 @@ export interface RealFix {
   note?: string;
 }
 
+/** One key in a containment plan. */
+export interface ContainStep {
+  findingId: string;
+  label: string;
+  provider: string;
+  file: string;
+  line: number;
+  /** What the key reaches, most sensitive first. */
+  reach: string[];
+  /** `revoke`: Tripwire can kill it with an API call. `guided`: the user does it, following `guide`. */
+  mode: "revoke" | "guided";
+  /** Why a key is guided or not touched, e.g. "not confirmed live". */
+  reason?: string;
+  action: string;
+  guide: { url?: string; steps: string[] };
+}
+
+export interface ContainResult {
+  findingId: string;
+  status: "planned" | "guided" | "revoked" | "failed" | "still-live";
+  note: string;
+  /** Command that undoes a reversible action (AWS key deactivation). */
+  reactivate?: string;
+}
+
+export interface RealContain {
+  status: "idle" | "running" | "done" | "failed";
+  applied?: boolean;
+  plan: ContainStep[];
+  results: ContainResult[];
+  note?: string;
+}
+
 export interface RealScan {
   status: "idle" | "cloning" | "secrets" | "history" | "verify" | "vulns" | "done" | "failed";
   verify?: boolean;
@@ -217,4 +250,5 @@ export interface RealScan {
   findings: Finding[];
   vulns: VulnPackage[];
   fix: RealFix;
+  contain: RealContain;
 }

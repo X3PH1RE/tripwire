@@ -21,6 +21,11 @@ export interface ScanOptions {
   verify?: boolean;
   /** Apply `.tripwire-baseline.json` when present (default true). */
   baseline?: boolean;
+  /**
+   * Receives each finding id's secret value, in memory only, for callers that act on the secrets (containment).
+   * Values are never part of the returned report.
+   */
+  onValues?: (values: Map<string, string>) => void;
 }
 
 export interface ScanReport {
@@ -80,6 +85,7 @@ export async function scanTarget(input: string, opts: ScanOptions = {}, onStage?
       onStage?.("verify", { commitsScanned: past.commits, findings });
       await verifyFindings(findings, values, honeyKeyIds()).catch((err: Error) => warnings.push(`Key verification failed: ${err.message}`));
     }
+    opts.onValues?.(values);
     const graph = buildGraph(name, findings, ciSecretRefs(dir, files), samples);
     onStage?.("vulns", { commitsScanned: past.commits, findings, ...graph });
     let vulns: VulnPackage[] = [];
