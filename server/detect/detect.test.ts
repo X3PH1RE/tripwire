@@ -114,3 +114,32 @@ test("private keys need the full block and report the line they start on", () =>
   assert.equal(e.scan("-----BEGIN RSA PRIVATE KEY-----").length, 0, "header only");
   assert.equal(e.scan(pem, "package-lock.json").length, 0, "globally allowlisted path");
 });
+
+test("secrets hidden in base64, url-encoding and hex are found and labelled", () => {
+  const e = defaultEngine();
+  const aws = ["AKIA", "Q3MXR7ZB2KD4WT6N"].join("");
+  const b64 = (s: string) => Buffer.from(s).toString("base64");
+
+  const k8s = e.scan(`  token: ${b64(aws)}`, "secret.yaml");
+  assert.equal(k8s[0].rule.id, "aws-access-key");
+  assert.equal(k8s[0].via, "base64");
+  assert.equal(k8s[0].value, aws);
+
+  const plainSecret = `${rand(22)}7q`; // digits keep it from reading as an identifier
+  const named = e.scan(`password: ${b64(plainSecret)}`, "secret.yaml");
+  assert.equal(named.length, 1);
+  assert.equal(named[0].via, "base64");
+  assert.equal(named[0].variable, "password");
+
+  const pct = (s: string) => [...s].map((c) => "%" + c.charCodeAt(0).toString(16).padStart(2, "0")).join("");
+  const url = e.scan(`https://x.io/cb?next=${pct(`aws_access_key_id=${aws}`)}`, "a.md");
+  assert.equal(url.find((h) => h.rule.id === "aws-access-key")?.via, "url");
+
+  const hex = e.scan(`blob = "${Buffer.from(`aws_access_key_id=${aws}`).toString("hex")}"`, "a.py");
+  assert.equal(hex.find((h) => h.rule.id === "aws-access-key")?.via, "hex");
+
+  const twice = e.scan(`x: ${b64(b64(aws))}`, "a.yaml");
+  assert.equal(twice.find((h) => h.rule.id === "aws-access-key")?.via, "base64>base64");
+
+  assert.deepEqual(e.scan(`etag: ${b64(rand(40))}`, "a.yaml").filter((h) => h.via), [], "binary garbage is not scanned");
+});

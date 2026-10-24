@@ -29,10 +29,24 @@ export interface Hit {
 const MAX_LINE = 2000;
 const MAX_PER_RULE_PER_LINE = 10;
 
-const ASSIGN = /\b([A-Za-z][A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD|CREDENTIALS?|AUTH|URL|URI|DSN))["']?\s*[:=]\s*["']?([^\s"'`,;]+)/i;
+// A name ending in KEY/TOKEN/..., or one of the unambiguous bare names (`password: ...`, `secret = ...`).
+const ASSIGN = /\b([A-Za-z][A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD|CREDENTIALS?|AUTH|URL|URI|DSN)|PASSWORD|PASSWD|SECRET|TOKEN|CREDENTIALS?)["']?\s*[:=]\s*["']?([^\s"'`,;]+)/i;
 const STRONG_NAME = /SECRET|PASSWORD|PASSWD|PWD|TOKEN|API_?KEY|PRIVATE|CREDENTIAL/i;
 /** Where generic (name-based) matches are noise: lockfiles, vendored code, fixtures and generated output. */
 const GENERIC_SKIP_PATH = /(?:^|\/)(?:__snapshots__|__fixtures__|fixtures?|testdata|test-data|mocks?|node_modules|vendor)\/|\.(?:snap|lock|min\.js|map|svg)$|(?:^|\/)(?:package-lock\.json|yarn\.lock|pnpm-lock\.yaml)$/i;
+
+const MAX_DECODE_DEPTH = 2;
+const MAX_DECODE_TOKENS = 6;
+const B64_TOKEN = /[A-Za-z0-9+/_-]{24,}={0,2}/g;
+const HEX_TOKEN = /\b(?:[0-9a-fA-F]{2}){16,}\b/g;
+
+/** The text when it is (almost) all printable ASCII; random bytes from a bogus decode are not worth scanning. */
+function printable(buf: Buffer): string | undefined {
+  if (buf.length < 8) return undefined;
+  let ok = 0;
+  for (const b of buf) if ((b >= 32 && b < 127) || b === 9 || b === 10 || b === 13) ok++;
+  return ok / buf.length >= 0.95 ? buf.toString("utf8") : undefined;
+}
 
 const GENERIC_RULE = { id: "generic-assignment", label: "High-entropy secret", provider: "unknown", re: /$^/, confidence: "low" as Confidence };
 
@@ -75,7 +89,9 @@ export class Engine {
 
     const lines = content.split(/\r?\n/);
     const lineRules = active.filter((r) => !r.def.multiline);
-    lines.forEach((text, i) => out.push(...this.scanLine(text, path, startLine + i, lineRules)));
+    // Decoded text can contain keywords the file as a whole did not, so decoding tests against every rule that applies to this path.
+    const decodeRules = this.rules.filter((r) => !r.def.multiline && (!r.path || (!!path && r.path.test(path))));
+    lines.forEach((text, i) => out.push(...this.scanLine(text, path, startLine + i, lineRules, decodeRules)));
 
     const multi = active.filter((r) => r.def.multiline);
     if (multi.length) {
@@ -102,7 +118,7 @@ export class Engine {
     return out.sort((a, b) => a.line - b.line);
   }
 
-  private scanLine(text: string, path: string | undefined, line: number, rules: CompiledRule[]): Hit[] {
+  private scanLine(text: string, path: string | undefined, line: number, rules: CompiledRule[], decodeRules: CompiledRule[], via?: string): Hit[] {
     if (text.length > MAX_LINE || !text.trim()) return [];
     const lower = text.toLowerCase();
     const variable = text.match(ASSIGN)?.[1];
@@ -117,10 +133,39 @@ export class Engine {
         if (hit) hits.push(hit);
       }
     }
-    const resolved = resolve(hits);
+    if (via === undefined || via.split(">").length < MAX_DECODE_DEPTH) hits.push(...this.decoded(text, path, line, decodeRules, via));
+    const resolved = resolve(hits).map((h) => (via && !h.via ? { ...h, via } : h));
     if (resolved.length) return resolved;
     const generic = this.generic(text, path, line);
-    return generic ? [generic] : [];
+    return generic ? [{ ...generic, via }] : [];
+  }
+
+  /** Re-scans base64, URL-encoded and hex values on the line, so a secret hidden in encoding is still found. */
+  private decoded(text: string, path: string | undefined, line: number, rules: CompiledRule[], via: string | undefined): Hit[] {
+    const out: Hit[] = [];
+    const next = (kind: string) => (via ? `${via}>${kind}` : kind);
+    const rescan = (decodedText: string, kind: string) => out.push(...this.scanLine(decodedText, path, line, rules, rules, next(kind)));
+
+    if (/%[0-9a-f]{2}/i.test(text)) {
+      try {
+        const url = decodeURIComponent(text);
+        if (url !== text) rescan(url, "url");
+      } catch {
+        // malformed escape sequence: nothing to decode
+      }
+    }
+    const assign = text.match(ASSIGN);
+    for (const m of [...text.matchAll(B64_TOKEN)].slice(0, MAX_DECODE_TOKENS)) {
+      const plain = printable(Buffer.from(m[0], /[-_]/.test(m[0]) ? "base64url" : "base64"));
+      if (!plain) continue;
+      // `password: <base64>` (Kubernetes secrets, CI variables): test the decoded value under the same name.
+      rescan(assign && assign[2] === m[0] ? `${assign[1]}=${plain}` : plain, "base64");
+    }
+    for (const m of [...text.matchAll(HEX_TOKEN)].slice(0, MAX_DECODE_TOKENS)) {
+      const plain = printable(Buffer.from(m[0], "hex"));
+      if (plain) rescan(plain, "hex");
+    }
+    return out;
   }
 
   /** Applies the secret-group, placeholder, entropy, structure and allowlist filters to one regex match. */
