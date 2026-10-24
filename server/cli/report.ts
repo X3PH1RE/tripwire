@@ -20,10 +20,13 @@ export interface Verdict {
   blockingVulns: VulnPackage[];
 }
 
+/** A key the provider confirmed live is high-confidence by definition, wherever it was found (a test fixture holding a real key is still a leak). */
+const effectiveConfidence = (f: Finding): Confidence => (f.verify?.status === "live" ? "high" : (f.confidence ?? "high"));
+
 /** In diff mode only secrets the change adds block; otherwise every secret still in the code does. Baselined findings and findings below `minConfidence` are reported but never block. */
 export function evaluate(r: ScanReport, policy: Policy): Verdict {
   const floor = CONFIDENCE_RANK[policy.minConfidence ?? "low"];
-  const active = r.findings.filter((f) => f.verify?.status !== "revoked" && f.verify?.status !== "honey" && !f.baselined && CONFIDENCE_RANK[f.confidence ?? "high"] >= floor);
+  const active = r.findings.filter((f) => f.verify?.status !== "revoked" && f.verify?.status !== "honey" && !f.baselined && CONFIDENCE_RANK[effectiveConfidence(f)] >= floor);
   const candidates = r.diffBase ? active.filter((f) => f.isNew) : active.filter((f) => f.inHead);
   const blocking = policy.secrets ? candidates : [];
   const blockingVulns = policy.vulns === "none" ? [] : r.vulns.filter((v) => RANK[v.severity] >= RANK[policy.vulns as Severity]);

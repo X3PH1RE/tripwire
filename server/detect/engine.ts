@@ -277,6 +277,9 @@ export class Engine {
       if (r.reject) return undefined;
       if (r.confidence) confidence = r.confidence;
     }
+    // Test fixtures and docs hold fake tokens far more often than real ones. Still reported, but a provider-format match there
+    // does not rank as high; a key the provider confirms live is treated as high again when deciding what blocks (see evaluate).
+    if (confidence === "high" && path && ILLUSTRATIVE_PATH.test(path)) confidence = "medium";
     // A key checked out with CRLF and the same key read back from git (LF) must be one finding, not two.
     const reported = def.reportGroup ? (groupValue(def.reportGroup) ?? m[0]) : secret;
     const value = def.multiline ? reported.replace(/\r/g, "") : reported;

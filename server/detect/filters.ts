@@ -167,7 +167,7 @@ export function runCheck(check: CheckId, secret: string, path?: string): { rejec
 }
 
 /** Docs, examples and tests: places where credentials are far more often illustrations than leaks. */
-export const ILLUSTRATIVE_PATH = /(?:^|\/)(?:docs?|documentation|examples?|samples?|demos?|tests?|__tests__|specs?|e2e)\/|\.(?:md|mdx|rst|adoc|txt)$|(?:^|\/)README/i;
+export const ILLUSTRATIVE_PATH = /(?:^|\/)(?:docs?|documentation|examples?|samples?|demos?|tests?|__tests__|specs?|e2e)\/|\.(?:md|mdx|rst|adoc|txt)$|(?:^|\/)README|\.(?:spec|test)\.[cm]?[jt]sx?$|_test\.(?:go|py|rb|exs?)$|(?:^|\/)test_[^/]*\.py$|_spec\.rb$|Tests?\.(?:java|kt|cs|swift)$/i;
 
 // ---- fingerprints ----
 

@@ -146,7 +146,7 @@ function runCheck(check, secret, path) {
       return WEAK_PASSWORD.test(secret) || !!path && ILLUSTRATIVE_PATH.test(path) ? { confidence: "low" } : {};
   }
 }
-var ILLUSTRATIVE_PATH = /(?:^|\/)(?:docs?|documentation|examples?|samples?|demos?|tests?|__tests__|specs?|e2e)\/|\.(?:md|mdx|rst|adoc|txt)$|(?:^|\/)README/i;
+var ILLUSTRATIVE_PATH = /(?:^|\/)(?:docs?|documentation|examples?|samples?|demos?|tests?|__tests__|specs?|e2e)\/|\.(?:md|mdx|rst|adoc|txt)$|(?:^|\/)README|\.(?:spec|test)\.[cm]?[jt]sx?$|_test\.(?:go|py|rb|exs?)$|(?:^|\/)test_[^/]*\.py$|_spec\.rb$|Tests?\.(?:java|kt|cs|swift)$/i;
 function fingerprint(ruleId, file, value) {
   return createHash("sha256").update(`${ruleId}\0${file}\0${value}`).digest("hex").slice(0, 24);
 }
@@ -1070,6 +1070,7 @@ var Engine = class {
       if (r.reject) return void 0;
       if (r.confidence) confidence = r.confidence;
     }
+    if (confidence === "high" && path && ILLUSTRATIVE_PATH.test(path)) confidence = "medium";
     const reported = def.reportGroup ? groupValue(def.reportGroup) ?? m[0] : secret;
     const value = def.multiline ? reported.replace(/\r/g, "") : reported;
     return { rule: rule2, value, variable, line: lineNo, confidence };
@@ -3937,31 +3938,50 @@ function normalizeTarget(input) {
   if (/^[\w.-]+\/[\w.-]+$/.test(t) && !existsSync4(t)) return `https://github.com/${t}.git`;
   return t;
 }
+async function githubToken() {
+  if (process.env.GITHUB_TOKEN) return process.env.GITHUB_TOKEN;
+  try {
+    return (await run("gh", ["auth", "token"], { timeout: 5e3 })).stdout.trim() || void 0;
+  } catch {
+    return void 0;
+  }
+}
+function gitReason(err) {
+  const e = err;
+  if (e.killed || e.signal === "SIGTERM") return "timed out";
+  const lines = String(e.stderr ?? e.message ?? "").split("\n").map((l) => l.trim()).filter(Boolean);
+  return (lines.reverse().find((l) => !/^(hint|error: )/i.test(l)) ?? lines[0] ?? "unknown error").replace(/^fatal:\s*/i, "");
+}
 async function cloneRepo(url, depth = HISTORY_COMMITS) {
   if (!/^(https?:\/\/|git@)/.test(url)) throw new Error("Enter a Git URL or owner/name");
-  const tmp = mkdtempSync(join4(tmpdir(), "tripwire-real-"));
-  const args = ["clone", "--quiet", "--single-branch", "--no-tags", "--depth", String(Math.max(1, depth)), url, tmp];
-  const env = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
-  try {
-    await run("git", args, { timeout: 9e4, env });
-  } catch (err) {
-    const token = process.env.GITHUB_TOKEN;
-    if (!token || !url.includes("github.com")) {
-      rmSync(tmp, { recursive: true, force: true });
-      throw new Error(`Clone failed: ${err.message.split("\n")[0]}`);
+  const args = ["clone", "--quiet", "--single-branch", "--no-tags", "--depth", String(Math.max(1, depth)), url];
+  const env = { ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never", GIT_ASKPASS: "echo" };
+  const timeout = Number(process.env.CLONE_TIMEOUT_MS ?? 6e5);
+  const attempt = async (extra) => {
+    const dest = mkdtempSync(join4(tmpdir(), "tripwire-real-"));
+    try {
+      await run("git", [...extra, ...args, dest], { timeout, env, maxBuffer: 16 * 1024 * 1024 });
+      return dest;
+    } catch (err) {
+      rmSync(dest, { recursive: true, force: true });
+      throw err;
     }
-    rmSync(tmp, { recursive: true, force: true });
-    const retry = mkdtempSync(join4(tmpdir(), "tripwire-real-"));
+  };
+  try {
+    return await attempt([]);
+  } catch (first2) {
+    if (gitReason(first2) === "timed out") throw new Error(`Clone failed: timed out after ${Math.round(timeout / 1e3)}s. The repository is large or the connection is slow; raise CLONE_TIMEOUT_MS.`);
+    if (!url.includes("github.com")) throw new Error(`Clone failed: ${gitReason(first2)}`);
+    const token = await githubToken();
+    if (!token) throw new Error(`Clone failed: ${gitReason(first2)}. If the repository is private, set GITHUB_TOKEN or run \`gh auth login\` and scan again.`);
     const auth = Buffer.from(`x-access-token:${token}`).toString("base64");
     try {
-      await run("git", ["-c", `http.extraHeader=Authorization: Basic ${auth}`, ...args.slice(0, -1), retry], { timeout: 9e4, env });
-    } catch {
-      rmSync(retry, { recursive: true, force: true });
-      throw new Error("Clone failed: repository not found or not accessible with this token");
+      return await attempt(["-c", `http.extraHeader=Authorization: Basic ${auth}`]);
+    } catch (second) {
+      if (gitReason(second) === "timed out") throw new Error(`Clone failed: timed out after ${Math.round(timeout / 1e3)}s. The repository is large or the connection is slow; raise CLONE_TIMEOUT_MS.`);
+      throw new Error(`Clone failed: ${gitReason(second)}. The repository was not found, or this token cannot read it.`);
     }
-    return retry;
   }
-  return tmp;
 }
 function manifestDirs(files) {
   const dirs = /* @__PURE__ */ new Set();
@@ -4449,9 +4469,10 @@ import { appendFileSync as appendFileSync2, readFileSync as readFileSync6 } from
 // server/cli/report.ts
 var MARKER = "<!-- tripwire-report -->";
 var RANK2 = { UNKNOWN: 0, LOW: 1, MODERATE: 2, HIGH: 3, CRITICAL: 4 };
+var effectiveConfidence = (f) => f.verify?.status === "live" ? "high" : f.confidence ?? "high";
 function evaluate(r, policy) {
   const floor = CONFIDENCE_RANK[policy.minConfidence ?? "low"];
-  const active = r.findings.filter((f) => f.verify?.status !== "revoked" && f.verify?.status !== "honey" && !f.baselined && CONFIDENCE_RANK[f.confidence ?? "high"] >= floor);
+  const active = r.findings.filter((f) => f.verify?.status !== "revoked" && f.verify?.status !== "honey" && !f.baselined && CONFIDENCE_RANK[effectiveConfidence(f)] >= floor);
   const candidates = r.diffBase ? active.filter((f) => f.isNew) : active.filter((f) => f.inHead);
   const blocking = policy.secrets ? candidates : [];
   const blockingVulns = policy.vulns === "none" ? [] : r.vulns.filter((v) => RANK2[v.severity] >= RANK2[policy.vulns]);

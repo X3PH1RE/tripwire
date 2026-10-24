@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import type { Finding } from "../../shared/types";
 import { scanTarget } from "../real/core";
 import { ignoreMatcher } from "../real/scan";
 import { evaluate, toMarkdown, unlocks } from "./report";
@@ -287,4 +288,12 @@ test("a repository with no commits yet scans its files instead of failing", asyn
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("--min-confidence high still blocks a live key found in a test file, but not an unchecked one", () => {
+  const base = { id: "f-0", rule: "stripe-live", ruleLabel: "Stripe live key", provider: "stripe", file: "a.spec.ts", line: 1, inHead: true, preview: "", service: "app", nodeId: "", confidence: "medium" as const };
+  const report = (verify?: Finding["verify"]) => ({ findings: [{ ...base, verify }], nodes: [], edges: [], vulns: [] }) as unknown as Parameters<typeof evaluate>[0];
+  const policy = { secrets: true, vulns: "none" as const, minConfidence: "high" as const };
+  assert.equal(evaluate(report(undefined), policy).failed, false);
+  assert.equal(evaluate(report({ status: "live", identity: "acct" }), policy).failed, true);
 });

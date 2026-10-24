@@ -193,3 +193,11 @@ test("a multi-line key is the same finding whether the file uses CRLF or LF", ()
   assert.equal(b.length, 1);
   assert.equal(a[0].value, b[0].value);
 });
+
+test("a provider-format token in a test file or doc ranks medium, not high", () => {
+  const e = defaultEngine();
+  const key = `STRIPE_KEY=sk_live_${rand(24)}`;
+  assert.equal(e.scan(key, "src/billing.ts")[0].confidence, "high");
+  for (const path of ["src/billing.spec.ts", "src/billing.test.tsx", "billing_test.go", "tests/test_billing.py", "app/billing_spec.rb", "docs/setup.md"])
+    assert.equal(e.scan(key, path)[0].confidence, "medium", path);
+});
