@@ -1,15 +1,158 @@
 #!/usr/bin/env node
 
 // server/cli/action.ts
-import { readFileSync as readFileSync5 } from "node:fs";
+import { readFileSync as readFileSync6 } from "node:fs";
 
 // server/cli/main.ts
-import { writeFileSync as writeFileSync2 } from "node:fs";
+import { writeFileSync as writeFileSync3 } from "node:fs";
 import { parseArgs } from "node:util";
+import { resolve as resolve4 } from "node:path";
 
 // server/real/core.ts
-import { existsSync as existsSync4, rmSync as rmSync2 } from "node:fs";
-import { resolve as resolve2 } from "node:path";
+import { existsSync as existsSync5, rmSync as rmSync2 } from "node:fs";
+import { resolve as resolve3 } from "node:path";
+
+// server/detect/baseline.ts
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+var BASELINE_FILE = ".tripwire-baseline.json";
+function loadBaseline(dir) {
+  const path = join(dir, BASELINE_FILE);
+  if (!existsSync(path)) return /* @__PURE__ */ new Set();
+  try {
+    const doc = JSON.parse(readFileSync(path, "utf8"));
+    return new Set((doc.entries ?? []).map((e) => e.fingerprint));
+  } catch {
+    return /* @__PURE__ */ new Set();
+  }
+}
+function writeBaseline(dir, entries) {
+  const unique = new Map(entries.map((e) => [e.fingerprint, e]));
+  const doc = { version: 1, entries: [...unique.values()].sort((a, b) => a.file.localeCompare(b.file) || a.rule.localeCompare(b.rule)) };
+  const path = join(dir, BASELINE_FILE);
+  writeFileSync(path, JSON.stringify(doc, null, 2) + "\n");
+  return path;
+}
+
+// server/detect/filters.ts
+import { createHash } from "node:crypto";
+function entropy(s) {
+  const counts = /* @__PURE__ */ new Map();
+  for (const ch of s) counts.set(ch, (counts.get(ch) ?? 0) + 1);
+  let h = 0;
+  for (const c of counts.values()) h -= c / s.length * Math.log2(c / s.length);
+  return h;
+}
+var LEADING_FLAGS = /^\(\?([ims]+)\)/;
+function compileRegex(src, extraFlags = "") {
+  let source = src;
+  let flags = extraFlags;
+  const lead = source.match(LEADING_FLAGS);
+  if (lead) {
+    source = source.slice(lead[0].length);
+    for (const f of lead[1]) if (!flags.includes(f)) flags += f;
+  }
+  try {
+    return new RegExp(source, flags);
+  } catch (err) {
+    const loosened = source.replace(/\(\?[ims]*(?:-[ims]+)?:/g, "(?:");
+    if (loosened === source) throw err;
+    return new RegExp(loosened, flags.includes("i") || /\(\?[ms]*i/.test(source) ? flags.replace("i", "") + "i" : flags);
+  }
+}
+var PLACEHOLDER_ANYWHERE = /example|sample|dummy|placeholder|changeme|change_me|your[_-]|xxxx|\*\*\*|<|>|\$\{|\{\{|process\.env|os\.environ|getenv|secrets\.|redacted|not[_-]?a[_-]?real|fake[_-]?key/i;
+var PLACEHOLDER_STANDALONE = /(?:^|[^a-z])(?:todo|replace|insert|test123|password123|secret123|true|false|null|none|undefined)(?:[^a-z]|$)/i;
+function isPlaceholder(value) {
+  return PLACEHOLDER_ANYWHERE.test(value) || PLACEHOLDER_STANDALONE.test(value) || /^(.)\1+$/.test(value);
+}
+var UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+var HEX_HASH = /^(?:[0-9a-f]{32}|[0-9a-f]{40}|[0-9a-f]{56}|[0-9a-f]{64}|[0-9a-f]{96}|[0-9a-f]{128})$/i;
+var VERSIONISH = /^v?\d+(?:\.\d+){1,3}(?:[-+][\w.]+)?$/;
+var SRI_OR_INTEGRITY = /^(?:sha(?:1|256|384|512)[-:])/i;
+var FORMAT_STRING = /%[sdifr]|%\(\w+\)[sd]|%\{\w+\}/;
+var MEMBER_CHAIN = /^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*){2,}$/;
+var FILENAME = /^[\w%./-]+\.(?:map|css|js|mjs|cjs|ts|tsx|jsx|json|ya?ml|xml|html?|txt|md|rst|py|rb|go|java|php|cs|rs|png|jpe?g|gif|svg|ico|webp|woff2?|ttf|tgz|tar|gz|zip|lock|conf|cfg|ini|log|sql|sh|pem|crt|cer|key|pub)$/i;
+var PASSWORD_HASH = /^(?:\$2[abxy]?\$\d{2}\$|\$argon2(?:id|i|d)\$|\$[156]\$|\$pbkdf2|\$scrypt\$|\{(?:SHA|SSHA|MD5|SHA256|SHA512|CRYPT|BCRYPT)\}|pbkdf2_sha\d+\$)/i;
+var HASHY_NAME = /HASH|DIGEST|CHECKSUM|SHA\d*|MD5|FINGERPRINT|ETAG|SALT|COMMIT|REVISION/i;
+function looksBenign(value, strongName = false) {
+  if (UUID.test(value) || VERSIONISH.test(value) || SRI_OR_INTEGRITY.test(value) || PASSWORD_HASH.test(value)) return true;
+  if (FORMAT_STRING.test(value) || MEMBER_CHAIN.test(value) || FILENAME.test(value)) return true;
+  return HEX_HASH.test(value) && !strongName;
+}
+function compileAllowlist(def) {
+  return {
+    condition: def.condition ?? "OR",
+    target: def.regexTarget ?? "secret",
+    regexes: (def.regexes ?? []).map((r) => compileRegex(r)),
+    stopwords: (def.stopwords ?? []).map((s) => s.toLowerCase()),
+    paths: (def.paths ?? []).map((p) => compileRegex(p))
+  };
+}
+function allowed(a, ctx) {
+  const text = a.target === "match" ? ctx.match : a.target === "line" ? ctx.line : ctx.secret;
+  const results = [];
+  if (a.regexes.length) results.push(a.regexes.some((r) => r.test(text)));
+  if (a.stopwords.length) {
+    const lower = ctx.secret.toLowerCase();
+    results.push(a.stopwords.some((w) => lower.includes(w)));
+  }
+  if (a.paths.length) results.push(!!ctx.path && a.paths.some((p) => p.test(ctx.path)));
+  if (!results.length) return false;
+  return a.condition === "AND" ? results.every(Boolean) : results.some(Boolean);
+}
+var B62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+var crcTable;
+function crc32(s) {
+  if (!crcTable) {
+    crcTable = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c2 = n;
+      for (let k = 0; k < 8; k++) c2 = c2 & 1 ? 3988292384 ^ c2 >>> 1 : c2 >>> 1;
+      crcTable[n] = c2 >>> 0;
+    }
+  }
+  let c = 4294967295;
+  for (const b of Buffer.from(s, "utf8")) c = crcTable[(c ^ b) & 255] ^ c >>> 8;
+  return (c ^ 4294967295) >>> 0;
+}
+function toBase62(n, width) {
+  let out = "";
+  while (n > 0) {
+    out = B62[n % 62] + out;
+    n = Math.floor(n / 62);
+  }
+  return out.padStart(width, "0");
+}
+function githubChecksumOk(token2) {
+  const body = token2.replace(/^(?:ghp|gho|ghu|ghs|ghr)_/, "");
+  if (body.length !== 36) return false;
+  return toBase62(crc32(body.slice(0, 30)), 6) === body.slice(30);
+}
+function jwtOk(token2) {
+  const parts = token2.split(".");
+  if (parts.length < 2) return false;
+  try {
+    const header = JSON.parse(Buffer.from(parts[0], "base64url").toString("utf8"));
+    return typeof header === "object" && header !== null && ("alg" in header || "typ" in header);
+  } catch {
+    return false;
+  }
+}
+var WEAK_PASSWORD = /^(?:pass(?:word|wd)?|secret|changeme|change_me|root|admin|test|testing|dev|development|postgres|mysql|mongo|redis|guest|example|demo|default|letmein|qwerty|0*1234\d*|\*+|x+)$/i;
+function runCheck(check, secret, path) {
+  switch (check) {
+    case "github-checksum":
+      return githubChecksumOk(secret) ? { confidence: "high" } : { confidence: "low" };
+    case "jwt":
+      return jwtOk(secret) ? {} : { reject: true };
+    case "db-password":
+      return WEAK_PASSWORD.test(secret) || !!path && ILLUSTRATIVE_PATH.test(path) ? { confidence: "low" } : {};
+  }
+}
+var ILLUSTRATIVE_PATH = /(?:^|\/)(?:docs?|documentation|examples?|samples?|demos?|tests?|__tests__|specs?|e2e)\/|\.(?:md|mdx|rst|adoc|txt)$|(?:^|\/)README/i;
+function fingerprint(ruleId, file, value) {
+  return createHash("sha256").update(`${ruleId}\0${file}\0${value}`).digest("hex").slice(0, 24);
+}
 
 // server/real/graph.ts
 var DB_LABEL = { postgres: "Postgres database", postgresql: "Postgres database", mysql: "MySQL database", mariadb: "MySQL database", mongodb: "MongoDB database", "mongodb+srv": "MongoDB database", redis: "Redis", rediss: "Redis", amqp: "Message queue", amqps: "Message queue" };
@@ -146,9 +289,9 @@ function buildGraph(repoName, findings, ciRefs, samples) {
 
 // server/real/honey.ts
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync as existsSync2, mkdirSync, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join as join2 } from "node:path";
 
 // server/github.ts
 var API = "https://api.github.com";
@@ -187,18 +330,18 @@ async function openMultiFilePr(repo, opts) {
 // server/real/honey.ts
 var CANARY = process.env.CANARYTOKENS_URL ?? "https://canarytokens.org";
 var API2 = `${CANARY}/d3aece8093b71007b5ccfedad91ebb11`;
-var HONEY_FILE = process.env.TRIPWIRE_HONEY_FILE ?? join(process.env.TRIPWIRE_HOME ?? join(homedir(), ".tripwire"), "honey.json");
+var HONEY_FILE = process.env.TRIPWIRE_HONEY_FILE ?? join2(process.env.TRIPWIRE_HOME ?? join2(homedir(), ".tripwire"), "honey.json");
 var HONEY_BRANCH_PREFIX = "tripwire/honey-";
 function loadHoney() {
   try {
-    return existsSync(HONEY_FILE) ? JSON.parse(readFileSync(HONEY_FILE, "utf8")) : [];
+    return existsSync2(HONEY_FILE) ? JSON.parse(readFileSync2(HONEY_FILE, "utf8")) : [];
   } catch {
     return [];
   }
 }
 function saveHoney(records) {
   mkdirSync(dirname(HONEY_FILE), { recursive: true });
-  writeFileSync(HONEY_FILE, JSON.stringify(records, null, 2), { mode: 384 });
+  writeFileSync2(HONEY_FILE, JSON.stringify(records, null, 2), { mode: 384 });
 }
 var honeyKeyIds = () => new Set(loadHoney().flatMap((r) => [r.accessKeyId, r.secretAccessKey]));
 var mask = (s) => `${s.slice(0, 8)}\u2022\u2022\u2022\u2022${s.slice(-4)}`;
@@ -317,11 +460,11 @@ async function plantHoney(id, repo, file = "deploy/backup.env") {
 }
 
 // server/real/osv.ts
-import { readFileSync as readFileSync2 } from "node:fs";
-import { dirname as dirname2, join as join2 } from "node:path";
+import { readFileSync as readFileSync3 } from "node:fs";
+import { dirname as dirname2, join as join3 } from "node:path";
 var json = (p) => {
   try {
-    return JSON.parse(readFileSync2(p, "utf8"));
+    return JSON.parse(readFileSync3(p, "utf8"));
   } catch {
     return void 0;
   }
@@ -338,7 +481,7 @@ function lockedByAncestor(files, pkgFile) {
 }
 function parseDeps(dir, files) {
   const deps = [];
-  const at = (f) => join2(dir, f);
+  const at = (f) => join3(dir, f);
   for (const f of files) {
     const name = f.split("/").pop();
     const sib = (n) => dirname2(f) === "." ? n : `${dirname2(f)}/${n}`;
@@ -362,13 +505,13 @@ function parseDeps(dir, files) {
         if (m) deps.push({ ecosystem: "npm", name: n, version: m[1], file: f, direct: true });
       }
     } else if (/^requirements.*\.txt$/.test(name)) {
-      for (const l of readFileSync2(at(f), "utf8").split(/\r?\n/)) {
+      for (const l of readFileSync3(at(f), "utf8").split(/\r?\n/)) {
         const m = l.match(/^\s*([A-Za-z0-9_.-]+)(?:\[[^\]]*\])?\s*==\s*([^\s;#]+)/);
         if (m) deps.push({ ecosystem: "PyPI", name: m[1], version: m[2], file: f, direct: true });
       }
     } else if (name === "go.mod") {
       let block = false;
-      for (const l of readFileSync2(at(f), "utf8").split(/\r?\n/)) {
+      for (const l of readFileSync3(at(f), "utf8").split(/\r?\n/)) {
         if (/^require\s*\($/.test(l.trim())) block = true;
         else if (l.trim() === ")") block = false;
         const m = (block ? l : l.replace(/^require\s+/, "")).trim().match(/^([\w./-]+\.[\w./-]+)\s+v([\w.+-]+)(\s*\/\/ indirect)?/);
@@ -379,7 +522,7 @@ function parseDeps(dir, files) {
       const req = Object.keys((json(at(sib("composer.json"))) ?? {}).require ?? {});
       for (const p of [...lock?.packages ?? [], ...lock?.["packages-dev"] ?? []]) deps.push({ ecosystem: "Packagist", name: p.name, version: String(p.version).replace(/^v/, ""), file: f, direct: req.includes(p.name) });
     } else if (name === "Gemfile.lock") {
-      const text = readFileSync2(at(f), "utf8");
+      const text = readFileSync3(at(f), "utf8");
       const direct = new Set([...(text.split(/^DEPENDENCIES$/m)[1] ?? "").matchAll(/^\s{2}([\w.-]+)/gm)].map((m) => m[1]));
       for (const m of text.matchAll(/^ {4}([\w.-]+) \(([\d.]+)\)$/gm)) deps.push({ ecosystem: "RubyGems", name: m[1], version: m[2], file: f, direct: direct.has(m[1]) });
     }
@@ -461,14 +604,14 @@ async function findVulns(deps) {
 }
 
 // server/real/verify.ts
-import { createHmac, createHash } from "node:crypto";
+import { createHmac, createHash as createHash2 } from "node:crypto";
 var TIMEOUT = Number(process.env.VERIFY_TIMEOUT_MS ?? 8e3);
 var CONCURRENCY = 6;
 var get = async (url, headers, method = "GET", body) => fetch(url, { method, headers, body, signal: AbortSignal.timeout(TIMEOUT) });
 var live = (identity, access = [], note) => ({ status: "live", identity, access, note });
 var revoked = (note) => ({ status: "revoked", note });
 var hmac = (key, data) => createHmac("sha256", key).update(data, "utf8").digest();
-var sha256 = (s) => createHash("sha256").update(s, "utf8").digest("hex");
+var sha256 = (s) => createHash2("sha256").update(s, "utf8").digest("hex");
 function sigV4(opts) {
   const amzDate = opts.now.toISOString().replace(/[-:]|\.\d{3}/g, "");
   const date = amzDate.slice(0, 8);
@@ -632,70 +775,3126 @@ async function verifyFindings(findings, values, honeyIds = /* @__PURE__ */ new S
 
 // server/real/scan.ts
 import { execFile } from "node:child_process";
-import { existsSync as existsSync3, mkdtempSync, readdirSync, readFileSync as readFileSync3, rmSync, statSync } from "node:fs";
+import { existsSync as existsSync4, mkdtempSync, readdirSync, readFileSync as readFileSync4, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join as join3, relative, resolve } from "node:path";
+import { basename, join as join4, relative, resolve as resolve2 } from "node:path";
 import { promisify } from "node:util";
 
-// server/real/rules.ts
-function entropy(s) {
-  const counts = /* @__PURE__ */ new Map();
-  for (const ch of s) counts.set(ch, (counts.get(ch) ?? 0) + 1);
-  let h = 0;
-  for (const c of counts.values()) h -= c / s.length * Math.log2(c / s.length);
-  return h;
-}
-var RULES = [
-  { id: "private-key", label: "Private key", provider: "ssh", re: /-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----/ },
-  { id: "aws-access-key", label: "AWS access key ID", provider: "aws", re: /\b((?:AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16})\b/ },
-  { id: "aws-secret-key", label: "AWS secret access key", provider: "aws", re: /aws_?secret_?(?:access_?)?key["']?\s*[:=]\s*["']?([A-Za-z0-9/+=]{40})\b/i },
-  { id: "github-pat", label: "GitHub token", provider: "github", re: /\b((?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,255})\b/ },
-  { id: "github-fine-grained", label: "GitHub fine-grained token", provider: "github", re: /\b(github_pat_[A-Za-z0-9_]{60,255})\b/ },
-  { id: "gitlab-pat", label: "GitLab token", provider: "gitlab", re: /\b(glpat-[A-Za-z0-9_-]{20,})\b/ },
-  { id: "stripe-live", label: "Stripe live key", provider: "stripe", re: /\b((?:sk|rk)_live_[A-Za-z0-9]{20,})\b/ },
-  { id: "stripe-test", label: "Stripe test key", provider: "stripe-test", re: /\b((?:sk|rk)_test_[A-Za-z0-9]{20,})\b/ },
-  { id: "slack-token", label: "Slack token", provider: "slack", re: /\b(xox[baprs]-[A-Za-z0-9-]{10,})\b/ },
-  { id: "slack-webhook", label: "Slack webhook", provider: "slack", re: /(https:\/\/hooks\.slack\.com\/services\/T[A-Za-z0-9_]+\/B[A-Za-z0-9_]+\/[A-Za-z0-9_]+)/ },
-  { id: "google-api-key", label: "Google API key", provider: "gcp", re: /\b(AIza[0-9A-Za-z_-]{35})\b/ },
-  { id: "anthropic-key", label: "Anthropic API key", provider: "anthropic", re: /\b(sk-ant-[A-Za-z0-9_-]{32,})\b/ },
-  { id: "openai-key", label: "OpenAI API key", provider: "openai", re: /\b(sk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}T3BlbkFJ[A-Za-z0-9_-]{20,})\b/ },
-  { id: "sendgrid-key", label: "SendGrid API key", provider: "sendgrid", re: /\b(SG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43})\b/ },
-  { id: "twilio-key", label: "Twilio API key", provider: "twilio", re: /\b(SK[0-9a-f]{32})\b/ },
-  { id: "npm-token", label: "npm access token", provider: "npm", re: /\b(npm_[A-Za-z0-9]{36})\b/ },
-  { id: "db-url", label: "Database URL with password", provider: "database", re: /\b((?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|rediss|amqps?):\/\/[^\s:/@"']+:([^\s@"'/]+)@[^\s"']+)/ },
-  { id: "tripwire-demo", label: "Tripwire demo secret", provider: "demo", re: /\b(tw_fake_[a-z]+_[a-z0-9]{16,})\b/ }
-];
-var ASSIGN = /\b([A-Za-z][A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD|CREDENTIALS?|AUTH|URL|URI|DSN))["']?\s*[:=]\s*["']?([^\s"'`,;]+)/i;
-var PLACEHOLDER = /example|sample|dummy|placeholder|changeme|change_me|your[_-]|xxxx|\*\*\*|<|>|\$\{|\{\{|process\.env|os\.environ|getenv|secrets\.|redacted|todo|replace|insert|test123|password123|^true$|^false$|^null$/i;
-var GENERIC = { id: "generic-assignment", label: "High-entropy secret", provider: "unknown", re: /$^/ };
-function isPlaceholder(value) {
-  return PLACEHOLDER.test(value) || /^(.)\1+$/.test(value);
-}
-function matchLine(text) {
-  if (text.length > 2e3) return [];
-  const variable = text.match(ASSIGN)?.[1];
-  const out = [];
-  for (const rule of RULES) {
-    const m = text.match(rule.re);
-    if (!m) continue;
-    const value = rule.id === "db-url" ? m[2] : m[1] ?? m[0];
-    if (rule.id !== "private-key" && isPlaceholder(value)) continue;
-    if (rule.id === "db-url" && value.length < 6) continue;
-    out.push({ rule, value: rule.id === "db-url" ? m[1] : value, variable });
+// server/detect/keywords.ts
+var KeywordIndex = class {
+  next;
+  // dense DFA: next[state << 7 | ascii]
+  outs;
+  size;
+  constructor(keywords) {
+    this.size = keywords.length;
+    let states = 1;
+    for (const k of keywords) states += k.length;
+    const goto = new Int32Array(states << 7).fill(-1);
+    const outs = new Array(states);
+    let count = 1;
+    keywords.forEach((k, id) => {
+      let s = 0;
+      for (let i = 0; i < k.length; i++) {
+        const c = k.charCodeAt(i);
+        if (c >= 128) throw new Error(`keyword must be ASCII: ${k}`);
+        const at = s << 7 | c;
+        if (goto[at] === -1) goto[at] = count++;
+        s = goto[at];
+      }
+      (outs[s] ??= []).push(id);
+    });
+    const fail = new Int32Array(count);
+    const queue = [];
+    for (let c = 0; c < 128; c++) {
+      const s = goto[c];
+      if (s === -1) goto[c] = 0;
+      else queue.push(s);
+    }
+    for (let head = 0; head < queue.length; head++) {
+      const s = queue[head];
+      for (let c = 0; c < 128; c++) {
+        const t = goto[s << 7 | c];
+        const viaFail = goto[fail[s] << 7 | c];
+        if (t === -1) goto[s << 7 | c] = viaFail;
+        else {
+          fail[t] = viaFail;
+          const inherited = outs[viaFail];
+          if (inherited) outs[t] = [...outs[t] ?? [], ...inherited];
+          queue.push(t);
+        }
+      }
+    }
+    this.next = goto.slice(0, count << 7);
+    this.outs = outs.slice(0, count);
   }
-  if (out.length) return out.filter((m) => !out.some((o) => o !== m && o.value.length > m.value.length && o.value.includes(m.value)));
-  const a = text.match(ASSIGN);
-  if (a) {
+  /** Calls `found(keywordId, lineIndex)` once per keyword per line. `text` must be lower-cased; lines are counted by `\n`. */
+  scan(text, found) {
+    const lastLine = new Int32Array(this.size).fill(-1);
+    const { next, outs } = this;
+    let state = 0;
+    let line = 0;
+    for (let i = 0; i < text.length; i++) {
+      const c = text.charCodeAt(i);
+      if (c === 10) line++;
+      state = next[state << 7 | (c < 128 ? c : 0)];
+      const o = outs[state];
+      if (o !== void 0)
+        for (let j = 0; j < o.length; j++) {
+          const k = o[j];
+          if (lastLine[k] !== line) {
+            lastLine[k] = line;
+            found(k, line);
+          }
+        }
+    }
+  }
+};
+
+// server/detect/engine.ts
+var MAX_LINE = 2e3;
+var MAX_PER_RULE_PER_LINE = 10;
+var ASSIGN = /\b([A-Za-z][A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD|CREDENTIALS?|AUTH|URL|URI|DSN)|PASSWORD|PASSWD|SECRET|TOKEN|CREDENTIALS?)["']?\s*[:=]\s*["']?([^\s"'`,;&]+)/i;
+var STRONG_NAME = /SECRET|PASSWORD|PASSWD|PWD|TOKEN|API_?KEY|PRIVATE|CREDENTIAL/i;
+var GENERIC_SKIP_PATH = /(?:^|\/)(?:__snapshots__|__fixtures__|fixtures?|testdata|test-data|mocks?|node_modules|vendor)\/|\.(?:snap|lock|min\.js|map|svg)$|(?:^|\/)(?:package-lock\.json|yarn\.lock|pnpm-lock\.yaml)$/i;
+var NO_RULES = [];
+var NO_HITS = [];
+var MIN_LINE = 8;
+var PCT_PROBE = /%[0-9a-f]{2}/i;
+var B64_PROBE = /[A-Za-z0-9+/_-]{24}/;
+var HEX_PROBE = /[0-9a-fA-F]{32}/;
+var MAX_DECODE_DEPTH = 2;
+var MAX_DECODE_TOKENS = 6;
+var B64_TOKEN = /[A-Za-z0-9+/_-]{24,}={0,2}/g;
+var HEX_TOKEN = /\b(?:[0-9a-fA-F]{2}){16,}\b/g;
+function printable(buf) {
+  if (buf.length < 8) return void 0;
+  let ok = 0;
+  for (const b of buf) if (b >= 32 && b < 127 || b === 9 || b === 10 || b === 13) ok++;
+  return ok / buf.length >= 0.95 ? buf.toString("utf8") : void 0;
+}
+var GENERIC_RULE = { id: "generic-assignment", label: "High-entropy secret", provider: "unknown", re: /$^/, confidence: "low" };
+function pathLike(v) {
+  return /^(?:\.{1,2}\/|\/)[\w.-]+/.test(v) || /^[a-z0-9._-]+(?:\/[a-z0-9._-]+){2,}$/.test(v);
+}
+var ASCII = /^[\x00-\x7f]+$/;
+var Engine = class {
+  rules = [];
+  global;
+  /** Single-pass keyword matcher over every line rule's keywords. */
+  keywordIndex;
+  /** keyword id -> rules that list it. */
+  keywordRules = [];
+  /** Line rules with no usable keyword: candidates for every line. */
+  always = [];
+  /** Rules restricted to certain paths; every other rule applies everywhere. */
+  pathRules = [];
+  anywhere = [];
+  constructor(packs) {
+    for (const pack of packs) {
+      if (pack.allowlist && !this.global) this.global = compileAllowlist(pack.allowlist);
+      for (const def of pack.rules) this.rules.push(this.compile(def, this.rules.length));
+    }
+    const ids = /* @__PURE__ */ new Map();
+    const keywords = [];
+    for (const r of this.rules) {
+      if (r.path) this.pathRules.push(r);
+      else this.anywhere.push(r);
+      if (r.def.multiline) continue;
+      if (!r.keywords.length || !r.keywords.every((k) => ASCII.test(k))) {
+        this.always.push(r);
+        continue;
+      }
+      for (const k of r.keywords) {
+        let id = ids.get(k);
+        if (id === void 0) {
+          id = keywords.length;
+          ids.set(k, id);
+          keywords.push(k);
+          this.keywordRules.push([]);
+        }
+        this.keywordRules[id].push(r);
+      }
+    }
+    this.keywordIndex = new KeywordIndex(keywords);
+  }
+  compile(def, index) {
+    const re = compileRegex(def.regex, "g");
+    return {
+      index,
+      def,
+      id: def.id,
+      label: def.label,
+      provider: def.provider,
+      re,
+      confidence: def.confidence ?? "high",
+      keywords: def.keywords.map((k) => k.toLowerCase()),
+      allow: (def.allowlists ?? []).map(compileAllowlist),
+      path: def.path ? compileRegex(def.path) : void 0
+    };
+  }
+  /** Scans a block of text (a whole file, a diff hunk or a single line). */
+  scan(content, path, startLine = 1) {
+    if (path && this.global?.paths.some((p) => p.test(path))) return [];
+    const lowerAll = content.toLowerCase();
+    const matching = path ? this.pathRules.filter((r) => r.path.test(path)) : [];
+    const forPath = matching.length ? [...this.anywhere, ...matching].sort((x, y) => x.index - y.index) : this.anywhere;
+    const out = [];
+    const lines = content.split(/\r?\n/);
+    const decodeRules = forPath.filter((r) => !r.def.multiline);
+    const perLine = this.candidates(lowerAll, lines.length, matching);
+    for (let i = 0; i < lines.length; i++) out.push(...this.scanLine(lines[i], path, startLine + i, perLine[i] ?? NO_RULES, decodeRules));
+    const multi = forPath.filter((r) => r.def.multiline && (!r.keywords.length || r.keywords.some((k) => lowerAll.includes(k))));
+    if (multi.length) {
+      const starts = [0];
+      for (let i = 0; i < content.length; i++) if (content.charCodeAt(i) === 10) starts.push(i + 1);
+      const lineAt = (idx) => {
+        let lo = 0;
+        let hi = starts.length - 1;
+        while (lo < hi) {
+          const mid = lo + hi + 1 >> 1;
+          if (starts[mid] <= idx) lo = mid;
+          else hi = mid - 1;
+        }
+        return startLine + lo;
+      };
+      for (const rule2 of multi) {
+        rule2.re.lastIndex = 0;
+        for (const m of content.matchAll(rule2.re)) {
+          const hit = this.accept(rule2, m, m[0], path, lineAt(m.index ?? 0), void 0);
+          if (hit) out.push(hit);
+        }
+      }
+    }
+    return out.sort((a, b) => a.line - b.line);
+  }
+  /**
+   * For each line, the line rules whose keywords it contains, in rule order. One Aho-Corasick pass over the file finds
+   * every keyword at once; testing each rule's keywords against each line (or sweeping the file once per keyword) is what
+   * made large repos slow.
+   */
+  candidates(lowerAll, lineCount, matching) {
+    const perLine = new Array(lineCount);
+    const eligible = (r) => !r.path || matching.includes(r);
+    const lastLine = new Int32Array(this.rules.length).fill(-1);
+    this.keywordIndex.scan(lowerAll, (keyword, line) => {
+      if (line >= lineCount) return;
+      for (const r of this.keywordRules[keyword]) {
+        if (lastLine[r.index] === line || !eligible(r)) continue;
+        lastLine[r.index] = line;
+        (perLine[line] ??= []).push(r);
+      }
+    });
+    for (const r of this.always) {
+      if (!eligible(r)) continue;
+      for (let i = 0; i < lineCount; i++) (perLine[i] ??= []).push(r);
+    }
+    for (const rules of perLine) if (rules && rules.length > 1) rules.sort((x, y) => x.index - y.index);
+    return perLine;
+  }
+  /** `via` is set when `text` came out of a decoder; those lines were not pre-filtered by keyword, so they are checked here. */
+  scanLine(text, path, line, rules, decodeRules, via) {
+    if (text.length > MAX_LINE || text.length < MIN_LINE) return NO_HITS;
+    let assign;
+    const getAssign = () => assign === void 0 ? assign = text.match(ASSIGN) : assign;
+    let hits;
+    if (rules.length) {
+      const lower = via === void 0 ? "" : text.toLowerCase();
+      const variable = getAssign()?.[1];
+      for (const rule2 of rules) {
+        if (via !== void 0 && rule2.keywords.length && !rule2.keywords.some((k) => lower.includes(k))) continue;
+        rule2.re.lastIndex = 0;
+        let n = 0;
+        for (const m of text.matchAll(rule2.re)) {
+          if (++n > MAX_PER_RULE_PER_LINE) break;
+          const hit = this.accept(rule2, m, text, path, line, variable);
+          if (hit) (hits ??= []).push(hit);
+        }
+      }
+    }
+    if (via === void 0 || via.split(">").length < MAX_DECODE_DEPTH) {
+      const found = this.decoded(text, path, line, decodeRules, via, getAssign);
+      if (found.length) (hits ??= []).push(...found);
+    }
+    if (hits) {
+      const resolved = resolve(hits);
+      if (resolved.length) return via ? resolved.map((h) => h.via ? h : { ...h, via }) : resolved;
+    }
+    const generic = this.generic(text, path, line, getAssign());
+    return generic ? [{ ...generic, via }] : NO_HITS;
+  }
+  /** Re-scans base64, URL-encoded and hex values on the line, so a secret hidden in encoding is still found. */
+  decoded(text, path, line, rules, via, getAssign) {
+    const pct = PCT_PROBE.test(text);
+    const b64 = B64_PROBE.test(text);
+    const hex = HEX_PROBE.test(text);
+    if (!pct && !b64 && !hex) return NO_HITS;
+    const out = [];
+    const next = (kind) => via ? `${via}>${kind}` : kind;
+    const rescan = (decodedText, kind) => out.push(...this.scanLine(decodedText, path, line, rules, rules, next(kind)));
+    if (pct) {
+      try {
+        const url = decodeURIComponent(text);
+        if (url !== text) rescan(url, "url");
+      } catch {
+      }
+    }
+    if (b64) {
+      const assign = getAssign();
+      for (const m of [...text.matchAll(B64_TOKEN)].slice(0, MAX_DECODE_TOKENS)) {
+        const plain = printable(Buffer.from(m[0], /[-_]/.test(m[0]) ? "base64url" : "base64"));
+        if (!plain) continue;
+        rescan(assign && assign[2] === m[0] ? `${assign[1]}=${plain}` : plain, "base64");
+      }
+    }
+    if (hex) {
+      for (const m of [...text.matchAll(HEX_TOKEN)].slice(0, MAX_DECODE_TOKENS)) {
+        const plain = printable(Buffer.from(m[0], "hex"));
+        if (plain) rescan(plain, "hex");
+      }
+    }
+    return out;
+  }
+  /** Applies the secret-group, placeholder, entropy, structure and allowlist filters to one regex match. */
+  accept(rule2, m, line, path, lineNo, variable) {
+    const def = rule2.def;
+    const groupValue = (g) => m[g] || void 0;
+    const secret = (def.secretGroup ? groupValue(def.secretGroup) : m.slice(1).find((g) => !!g)) ?? m[0];
+    if (!secret) return void 0;
+    if (!def.id.startsWith("private-key") && !def.multiline && isPlaceholder(secret)) return void 0;
+    if (def.minLength && secret.length < def.minLength) return void 0;
+    if (def.entropy !== void 0 && entropy(secret) <= def.entropy) return void 0;
+    if (this.global && allowed(this.global, { secret, match: m[0], line, path })) return void 0;
+    if (rule2.allow.some((a) => allowed(a, { secret, match: m[0], line, path }))) return void 0;
+    let confidence = rule2.confidence;
+    if (def.check) {
+      const r = runCheck(def.check, secret, path);
+      if (r.reject) return void 0;
+      if (r.confidence) confidence = r.confidence;
+    }
+    const value = def.reportGroup ? groupValue(def.reportGroup) ?? m[0] : secret;
+    return { rule: rule2, value, variable, line: lineNo, confidence };
+  }
+  /** Fallback for `NAME_KEY=<random-looking value>` when no provider rule matched. */
+  generic(text, path, line, a) {
+    if (!a || path && GENERIC_SKIP_PATH.test(path)) return void 0;
     const value = a[2];
-    if (value.length >= 16 && value.length <= 200 && !value.includes("://") && !/[\\()[\]{}^]/.test(value) && !isPlaceholder(value) && !/^[a-z]+(?:[._-][a-z]+)*$/i.test(value) && entropy(value) >= 3.8)
-      out.push({ rule: GENERIC, value, variable: a[1] });
+    if (value.length < 16 || value.length > 200) return void 0;
+    const strong = STRONG_NAME.test(a[1]) && !HASHY_NAME.test(a[1]);
+    if (value.includes("://") || /[\\()[\]{}^]/.test(value) || isPlaceholder(value) || looksBenign(value, strong) || pathLike(value)) return void 0;
+    if (/^[a-z]+(?:[._-][a-z]+)*$/i.test(value)) return void 0;
+    const hexOnly = /^[0-9a-f]+$/i.test(value);
+    const h = entropy(value);
+    if (h < (hexOnly ? 3.2 : 3.8)) return void 0;
+    const illustrative = !!path && ILLUSTRATIVE_PATH.test(path);
+    return { rule: GENERIC_RULE, value, variable: a[1], line, confidence: strong && h >= (hexOnly ? 3.4 : 4) && !illustrative ? "medium" : "low" };
   }
-  return out;
+};
+function resolve(hits) {
+  const seen = /* @__PURE__ */ new Set();
+  const unique = hits.filter((h) => seen.has(h.value) ? false : (seen.add(h.value), true));
+  return unique.filter((h) => !unique.some((o) => o !== h && o.value.length > h.value.length && o.value.includes(h.value)));
 }
-function mask2(value, rule) {
-  if (rule.id === "private-key") return "-----BEGIN \u2026 PRIVATE KEY-----";
-  if (rule.id === "db-url") return value.replace(/:\/\/([^:/@\s]+):[^@\s]+@/, "://$1:\u2022\u2022\u2022\u2022@").slice(0, 48);
-  if (rule.id === "tripwire-demo") return value.length > 22 ? `${value.slice(0, 22)}\u2026` : value;
+
+// server/detect/rules/gitleaks.json
+var gitleaks_default = {
+  source: "gitleaks",
+  license: "MIT (c) Zachary Rice and the Gitleaks contributors",
+  allowlist: {
+    regexes: [
+      "(?i)^true|false|null$",
+      "^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$",
+      "^\\$(?:\\d+|{\\d+})$",
+      "^\\$(?:[A-Z_]+|[a-z_]+)$",
+      "^\\${(?:[A-Z_]+|[a-z_]+)}$",
+      "^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$",
+      `^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w "'&./=|]*)[ \\t]*}}$`,
+      "^%(?:[A-Z_]+|[a-z_]+)%$",
+      "^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$",
+      "^\\{\\d{0,2}}$",
+      "^@(?:[A-Z_]+|[a-z_]+)@$",
+      "^/Users/(?i:[a-z0-9]+/[\\w .-/]+$)",
+      "^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$"
+    ],
+    stopwords: [
+      "014df517-39d1-4453-b7b3-9930c563627c",
+      "abcdefghijklmnopqrstuvwxyz"
+    ],
+    paths: [
+      "gitleaks\\.toml",
+      "(?i)\\.(?:bmp|gif|jpe?g|png|svg|tiff?)$",
+      "(?i)\\.(?:eot|[ot]tf|woff2?)$",
+      "(?i)\\.(?:docx?|xlsx?|pdf|bin|socket|vsidx|v2|suo|wsuo|.dll|pdb|exe|gltf)$",
+      "go\\.(?:mod|sum|work(?:\\.sum)?)$",
+      "(?:^|/)vendor/modules\\.txt$",
+      "(?:^|/)vendor/(?:github\\.com|golang\\.org/x|google\\.golang\\.org|gopkg\\.in|istio\\.io|k8s\\.io|sigs\\.k8s\\.io)(?:/.*)?$",
+      "(?:^|/)gradlew(?:\\.bat)?$",
+      "(?:^|/)gradle\\.lockfile$",
+      "(?:^|/)mvnw(?:\\.cmd)?$",
+      "(?:^|/)\\.mvn/wrapper/MavenWrapperDownloader\\.java$",
+      "(?:^|/)node_modules(?:/.*)?$",
+      "(?:^|/)(?:deno\\.lock|npm-shrinkwrap\\.json|package-lock\\.json|pnpm-lock\\.yaml|yarn\\.lock)$",
+      "(?:^|/)bower_components(?:/.*)?$",
+      "(?:^|/)(?:angular|bootstrap|jquery(?:-?ui)?|plotly|swagger-?ui)[a-zA-Z0-9.-]*(?:\\.min)?\\.js(?:\\.map)?$",
+      "(?:^|/)javascript\\.json$",
+      "(?:^|/)(?:Pipfile|poetry)\\.lock$",
+      "(?i)(?:^|/)(?:v?env|virtualenv)/lib(?:64)?(?:/.*)?$",
+      "(?i)(?:^|/)(?:lib(?:64)?/python[23](?:\\.\\d{1,2})+|python/[23](?:\\.\\d{1,2})+/lib(?:64)?)(?:/.*)?$",
+      "(?i)(?:^|/)[a-z0-9_.]+-[0-9.]+\\.dist-info(?:/.+)?$",
+      "(?:^|/)vendor/(?:bundle|ruby)(?:/.*?)?$",
+      "\\.gem$",
+      "verification-metadata\\.xml",
+      "Database.refactorlog",
+      "(?:^|/)\\.git$"
+    ]
+  },
+  rules: [
+    {
+      id: "1password-secret-key",
+      label: "1password secret key",
+      provider: "1password",
+      regex: "\\bA3-[A-Z0-9]{6}-(?:(?:[A-Z0-9]{11})|(?:[A-Z0-9]{6}-[A-Z0-9]{5}))-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}\\b",
+      keywords: [
+        "a3-"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3.8
+    },
+    {
+      id: "1password-service-account-token",
+      label: "1password service account token",
+      provider: "1password",
+      regex: "ops_eyJ[a-zA-Z0-9+/]{250,}={0,3}",
+      keywords: [
+        "ops_"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 4
+    },
+    {
+      id: "adafruit-api-key",
+      label: "Adafruit API key",
+      provider: "adafruit",
+      regex: `(?i)[\\w.-]{0,50}?(?:adafruit)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9_-]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "adafruit"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "adobe-client-id",
+      label: "Adobe client ID",
+      provider: "adobe",
+      regex: `(?i)[\\w.-]{0,50}?(?:adobe)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "adobe"
+      ],
+      source: "gitleaks",
+      confidence: "medium",
+      entropy: 2
+    },
+    {
+      id: "adobe-client-secret",
+      label: "Adobe client secret",
+      provider: "adobe",
+      regex: `\\b(p8e-(?i:[a-z0-9]{32}))(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "p8e-"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 2
+    },
+    {
+      id: "age-secret-key",
+      label: "Age secret key",
+      provider: "age",
+      regex: "AGE-SECRET-KEY-1[QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L]{58}",
+      keywords: [
+        "age-secret-key-1"
+      ],
+      source: "gitleaks",
+      confidence: "high"
+    },
+    {
+      id: "airtable-api-key",
+      label: "Airtable API key",
+      provider: "airtable",
+      regex: `(?i)[\\w.-]{0,50}?(?:airtable)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{17})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "airtable"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "airtable-personnal-access-token",
+      label: "Airtable personnal access token",
+      provider: "airtable",
+      regex: "\\b(pat[a-zA-Z0-9]{14}\\.[a-f0-9]{64})\\b",
+      keywords: [
+        "airtable"
+      ],
+      source: "gitleaks",
+      confidence: "high"
+    },
+    {
+      id: "algolia-api-key",
+      label: "Algolia API key",
+      provider: "algolia",
+      regex: `(?i)[\\w.-]{0,50}?(?:algolia)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "algolia"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "alibaba-access-key-id",
+      label: "Alibaba access key ID",
+      provider: "alibaba",
+      regex: `\\b(LTAI(?i:[a-z0-9]{20}))(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "ltai"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 2
+    },
+    {
+      id: "alibaba-secret-key",
+      label: "Alibaba secret key",
+      provider: "alibaba",
+      regex: `(?i)[\\w.-]{0,50}?(?:alibaba)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{30})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "alibaba"
+      ],
+      source: "gitleaks",
+      confidence: "medium",
+      entropy: 2
+    },
+    {
+      id: "anthropic-admin-api-key",
+      label: "Anthropic admin API key",
+      provider: "anthropic",
+      regex: `\\b(sk-ant-admin01-[a-zA-Z0-9_\\-]{93}AA)(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "sk-ant-admin01"
+      ],
+      source: "gitleaks",
+      confidence: "high"
+    },
+    {
+      id: "anthropic-api-key",
+      label: "Anthropic API key",
+      provider: "anthropic",
+      regex: `\\b(sk-ant-api03-[a-zA-Z0-9_\\-]{93}AA)(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "sk-ant-api03"
+      ],
+      source: "gitleaks",
+      confidence: "high"
+    },
+    {
+      id: "artifactory-api-key",
+      label: "Artifactory API key",
+      provider: "artifactory",
+      regex: "\\bAKCp[A-Za-z0-9]{69}\\b",
+      keywords: [
+        "akcp"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 4.5
+    },
+    {
+      id: "artifactory-reference-token",
+      label: "Artifactory reference token",
+      provider: "artifactory",
+      regex: "\\bcmVmd[A-Za-z0-9]{59}\\b",
+      keywords: [
+        "cmvmd"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 4.5
+    },
+    {
+      id: "asana-client-id",
+      label: "Asana client ID",
+      provider: "asana",
+      regex: `(?i)[\\w.-]{0,50}?(?:asana)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "asana"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "asana-client-secret",
+      label: "Asana client secret",
+      provider: "asana",
+      regex: `(?i)[\\w.-]{0,50}?(?:asana)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "asana"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "atlassian-api-token",
+      label: "Atlassian API token",
+      provider: "atlassian",
+      regex: `(?i)[\\w.-]{0,50}?(?:(?-i:ATLASSIAN|[Aa]tlassian)|(?-i:CONFLUENCE|[Cc]onfluence)|(?-i:JIRA|[Jj]ira))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{20}[a-f0-9]{4})(?:[\\x60'"\\s;]|\\\\[nr]|$)|\\b(ATATT3[A-Za-z0-9_\\-=]{186})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "atlassian",
+        "confluence",
+        "jira",
+        "atatt3"
+      ],
+      source: "gitleaks",
+      confidence: "medium",
+      entropy: 3.5
+    },
+    {
+      id: "authress-service-client-access-key",
+      label: "Authress service client access key",
+      provider: "authress",
+      regex: `\\b((?:sc|ext|scauth|authress)_(?i:[a-z0-9]{5,30}\\.[a-z0-9]{4,6}\\.(?-i:acc)[_-][a-z0-9-]{10,32}\\.[a-z0-9+/_=-]{30,120}))(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "sc_",
+        "ext_",
+        "scauth_",
+        "authress_"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 2
+    },
+    {
+      id: "aws-access-token",
+      label: "AWS access token",
+      provider: "aws",
+      regex: "\\b((?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z2-7]{16})\\b",
+      keywords: [
+        "a3t",
+        "akia",
+        "asia",
+        "abia",
+        "acca"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3,
+      allowlists: [
+        {
+          regexes: [
+            ".+EXAMPLE$"
+          ]
+        }
+      ]
+    },
+    {
+      id: "aws-amazon-bedrock-api-key-long-lived",
+      label: "AWS amazon bedrock API key long lived",
+      provider: "aws",
+      regex: `\\b(ABSK[A-Za-z0-9+/]{109,269}={0,2})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "absk"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "aws-amazon-bedrock-api-key-short-lived",
+      label: "AWS amazon bedrock API key short lived",
+      provider: "aws",
+      regex: "bedrock-api-key-YmVkcm9jay5hbWF6b25hd3MuY29t",
+      keywords: [
+        "bedrock-api-key-"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "azure-ad-client-secret",
+      label: "Azure ad client secret",
+      provider: "azure",
+      regex: `(?:^|[\\\\'"\\x60\\s>=:(,)])([a-zA-Z0-9_~.]{3}\\dQ~[a-zA-Z0-9_~.-]{31,34})(?:$|[\\\\'"\\x60\\s<),])`,
+      keywords: [
+        "q~"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "beamer-api-token",
+      label: "Beamer API token",
+      provider: "beamer",
+      regex: `(?i)[\\w.-]{0,50}?(?:beamer)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(b_[a-z0-9=_\\-]{44})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "beamer"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "bitbucket-client-id",
+      label: "Bitbucket client ID",
+      provider: "bitbucket",
+      regex: `(?i)[\\w.-]{0,50}?(?:bitbucket)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "bitbucket"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "bitbucket-client-secret",
+      label: "Bitbucket client secret",
+      provider: "bitbucket",
+      regex: `(?i)[\\w.-]{0,50}?(?:bitbucket)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "bitbucket"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "bittrex-access-key",
+      label: "Bittrex access key",
+      provider: "bittrex",
+      regex: `(?i)[\\w.-]{0,50}?(?:bittrex)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "bittrex"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "bittrex-secret-key",
+      label: "Bittrex secret key",
+      provider: "bittrex",
+      regex: `(?i)[\\w.-]{0,50}?(?:bittrex)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "bittrex"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "cisco-meraki-api-key",
+      label: "Cisco meraki API key",
+      provider: "cisco",
+      regex: `[\\w.-]{0,50}?(?i:[\\w.-]{0,50}?(?:(?-i:[Mm]eraki|MERAKI))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3})(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "meraki"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "clickhouse-cloud-api-secret-key",
+      label: "Clickhouse cloud API secret key",
+      provider: "clickhouse",
+      regex: "\\b(4b1d[A-Za-z0-9]{38})\\b",
+      keywords: [
+        "4b1d"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "clojars-api-token",
+      label: "Clojars API token",
+      provider: "clojars",
+      regex: "(?i)CLOJARS_[a-z0-9]{60}",
+      keywords: [
+        "clojars_"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 2
+    },
+    {
+      id: "cloudflare-api-key",
+      label: "Cloudflare API key",
+      provider: "cloudflare",
+      regex: `(?i)[\\w.-]{0,50}?(?:cloudflare)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9_-]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "cloudflare"
+      ],
+      source: "gitleaks",
+      confidence: "medium",
+      entropy: 2
+    },
+    {
+      id: "cloudflare-global-api-key",
+      label: "Cloudflare global API key",
+      provider: "cloudflare",
+      regex: `(?i)[\\w.-]{0,50}?(?:cloudflare)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{37})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "cloudflare"
+      ],
+      source: "gitleaks",
+      confidence: "medium",
+      entropy: 2
+    },
+    {
+      id: "cloudflare-origin-ca-key",
+      label: "Cloudflare origin ca key",
+      provider: "cloudflare",
+      regex: `\\b(v1\\.0-[a-f0-9]{24}-[a-f0-9]{146})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "cloudflare",
+        "v1.0-"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 2
+    },
+    {
+      id: "codecov-access-token",
+      label: "Codecov access token",
+      provider: "codecov",
+      regex: `(?i)[\\w.-]{0,50}?(?:codecov)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "codecov"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "cohere-api-token",
+      label: "Cohere API token",
+      provider: "cohere",
+      regex: `[\\w.-]{0,50}?(?i:[\\w.-]{0,50}?(?:cohere|CO_API_KEY)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3})(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-zA-Z0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "cohere",
+        "co_api_key"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 4
+    },
+    {
+      id: "coinbase-access-token",
+      label: "Coinbase access token",
+      provider: "coinbase",
+      regex: `(?i)[\\w.-]{0,50}?(?:coinbase)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9_-]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "coinbase"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "confluent-access-token",
+      label: "Confluent access token",
+      provider: "confluent",
+      regex: `(?i)[\\w.-]{0,50}?(?:confluent)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "confluent"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "confluent-secret-key",
+      label: "Confluent secret key",
+      provider: "confluent",
+      regex: `(?i)[\\w.-]{0,50}?(?:confluent)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "confluent"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "contentful-delivery-api-token",
+      label: "Contentful delivery API token",
+      provider: "contentful",
+      regex: `(?i)[\\w.-]{0,50}?(?:contentful)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{43})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "contentful"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "curl-auth-header",
+      label: "Curl auth header",
+      provider: "curl",
+      regex: `\\bcurl\\b(?:.*?|.*?(?:[\\r\\n]{1,2}.*?){1,5})[ \\t\\n\\r](?:-H|--header)(?:=|[ \\t]{0,5})(?:"(?i:(?:Authorization:[ \\t]{0,5}(?:Basic[ \\t]([a-z0-9+/]{8,}={0,3})|(?:Bearer|(?:Api-)?Token)[ \\t]([\\w=~@.+/-]{8,})|([\\w=~@.+/-]{8,}))|(?:(?:X-(?:[a-z]+-)?)?(?:Api-?)?(?:Key|Token)):[ \\t]{0,5}([\\w=~@.+/-]{8,}))"|'(?i:(?:Authorization:[ \\t]{0,5}(?:Basic[ \\t]([a-z0-9+/]{8,}={0,3})|(?:Bearer|(?:Api-)?Token)[ \\t]([\\w=~@.+/-]{8,})|([\\w=~@.+/-]{8,}))|(?:(?:X-(?:[a-z]+-)?)?(?:Api-?)?(?:Key|Token)):[ \\t]{0,5}([\\w=~@.+/-]{8,}))')))(?:\\B|\\s|(?![\\s\\S]))`,
+      keywords: [
+        "curl"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      multiline: true,
+      entropy: 2.75
+    },
+    {
+      id: "curl-auth-user",
+      label: "Curl auth user",
+      provider: "curl",
+      regex: `\\bcurl\\b(?:.*|.*(?:[\\r\\n]{1,2}.*){1,5})[ \\t\\n\\r](?:-u|--user)(?:=|[ \\t]{0,5})("(:[^"]{3,}|[^:"]{3,}:|[^:"]{3,}:[^"]{3,})"|'([^:']{3,}:[^']{3,})'|((?:"[^"]{3,}"|'[^']{3,}'|[\\w$@.-]+):(?:"[^"]{3,}"|'[^']{3,}'|[\\w\${}@.-]+)))(?:\\s|(?![\\s\\S]))`,
+      keywords: [
+        "curl"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      multiline: true,
+      entropy: 2,
+      allowlists: [
+        {
+          regexes: [
+            "[^:]+:(?:change(?:it|me)|pass(?:word)?|pwd|test|token|\\*+|x+)",
+            `['"]?<[^>]+>['"]?:['"]?<[^>]+>|<[^:]+:[^>]+>['"]?`,
+            "[^:]+:\\[[^]]+]",
+            `['"]?[^:]+['"]?:['"]?\\$(?:\\d|\\w+|\\{(?:\\d|\\w+)})['"]?`,
+            "\\$\\([^)]+\\):\\$\\([^)]+\\)",
+            `['"]?\\$?{{[^}]+}}['"]?:['"]?\\$?{{[^}]+}}['"]?`
+          ]
+        }
+      ]
+    },
+    {
+      id: "databricks-api-token",
+      label: "Databricks API token",
+      provider: "databricks",
+      regex: `\\b(dapi[a-f0-9]{32}(?:-\\d)?)(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "dapi"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "datadog-access-token",
+      label: "Datadog access token",
+      provider: "datadog",
+      regex: `(?i)[\\w.-]{0,50}?(?:datadog)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "datadog"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "defined-networking-api-token",
+      label: "Defined networking API token",
+      provider: "defined",
+      regex: `(?i)[\\w.-]{0,50}?(?:dnkey)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(dnkey-[a-z0-9=_\\-]{26}-[a-z0-9=_\\-]{52})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "dnkey"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "digitalocean-access-token",
+      label: "Digitalocean access token",
+      provider: "digitalocean",
+      regex: `\\b(doo_v1_[a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "doo_v1_"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "digitalocean-pat",
+      label: "Digitalocean PAT",
+      provider: "digitalocean",
+      regex: `\\b(dop_v1_[a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "dop_v1_"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "digitalocean-refresh-token",
+      label: "Digitalocean refresh token",
+      provider: "digitalocean",
+      regex: `(?i)\\b(dor_v1_[a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "dor_v1_"
+      ],
+      source: "gitleaks",
+      confidence: "high"
+    },
+    {
+      id: "discord-api-token",
+      label: "Discord API token",
+      provider: "discord",
+      regex: `(?i)[\\w.-]{0,50}?(?:discord)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "discord"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "discord-client-id",
+      label: "Discord client ID",
+      provider: "discord",
+      regex: `(?i)[\\w.-]{0,50}?(?:discord)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9]{18})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "discord"
+      ],
+      source: "gitleaks",
+      confidence: "medium",
+      entropy: 2
+    },
+    {
+      id: "discord-client-secret",
+      label: "Discord client secret",
+      provider: "discord",
+      regex: `(?i)[\\w.-]{0,50}?(?:discord)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "discord"
+      ],
+      source: "gitleaks",
+      confidence: "medium",
+      entropy: 2
+    },
+    {
+      id: "doppler-api-token",
+      label: "Doppler API token",
+      provider: "doppler",
+      regex: "dp\\.pt\\.(?i:[a-z0-9]{43})",
+      keywords: [
+        "dp.pt."
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 2
+    },
+    {
+      id: "droneci-access-token",
+      label: "Droneci access token",
+      provider: "droneci",
+      regex: `(?i)[\\w.-]{0,50}?(?:droneci)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "droneci"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "dropbox-api-token",
+      label: "Dropbox API token",
+      provider: "dropbox",
+      regex: `(?i)[\\w.-]{0,50}?(?:dropbox)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{15})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "dropbox"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "dropbox-long-lived-api-token",
+      label: "Dropbox long lived API token",
+      provider: "dropbox",
+      regex: `(?i)[\\w.-]{0,50}?(?:dropbox)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{11}(AAAAAAAAAA)[a-z0-9\\-_=]{43})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "dropbox"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "dropbox-short-lived-api-token",
+      label: "Dropbox short lived API token",
+      provider: "dropbox",
+      regex: `(?i)[\\w.-]{0,50}?(?:dropbox)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(sl\\.[a-z0-9\\-=_]{135})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "dropbox"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "duffel-api-token",
+      label: "Duffel API token",
+      provider: "duffel",
+      regex: "duffel_(?:test|live)_(?i:[a-z0-9_\\-=]{43})",
+      keywords: [
+        "duffel_"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 2
+    },
+    {
+      id: "dynatrace-api-token",
+      label: "Dynatrace API token",
+      provider: "dynatrace",
+      regex: "dt0c01\\.(?i:[a-z0-9]{24}\\.[a-z0-9]{64})",
+      keywords: [
+        "dt0c01."
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 4
+    },
+    {
+      id: "easypost-api-token",
+      label: "Easypost API token",
+      provider: "easypost",
+      regex: "\\bEZAK(?i:[a-z0-9]{54}\\b)",
+      keywords: [
+        "ezak"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 2
+    },
+    {
+      id: "easypost-test-api-token",
+      label: "Easypost test API token",
+      provider: "easypost",
+      regex: "\\bEZTK(?i:[a-z0-9]{54}\\b)",
+      keywords: [
+        "eztk"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 2
+    },
+    {
+      id: "etsy-access-token",
+      label: "Etsy access token",
+      provider: "etsy",
+      regex: `(?i)[\\w.-]{0,50}?(?:(?-i:ETSY|[Ee]tsy))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{24})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "etsy"
+      ],
+      source: "gitleaks",
+      confidence: "medium",
+      entropy: 3
+    },
+    {
+      id: "facebook-access-token",
+      label: "Facebook access token",
+      provider: "facebook",
+      regex: `(?i)\\b(\\d{15,16}(\\||%)[0-9a-z\\-_]{27,40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "facebook"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "facebook-page-access-token",
+      label: "Facebook page access token",
+      provider: "facebook",
+      regex: `\\b(EAA[MC](?i:[a-z0-9]{100,}))(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "eaam",
+        "eaac"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 4
+    },
+    {
+      id: "facebook-secret",
+      label: "Facebook secret",
+      provider: "facebook",
+      regex: `(?i)[\\w.-]{0,50}?(?:facebook)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "facebook"
+      ],
+      source: "gitleaks",
+      confidence: "medium",
+      entropy: 3
+    },
+    {
+      id: "fastly-api-token",
+      label: "Fastly API token",
+      provider: "fastly",
+      regex: `(?i)[\\w.-]{0,50}?(?:fastly)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "fastly"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "finicity-api-token",
+      label: "Finicity API token",
+      provider: "finicity",
+      regex: `(?i)[\\w.-]{0,50}?(?:finicity)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "finicity"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "finicity-client-secret",
+      label: "Finicity client secret",
+      provider: "finicity",
+      regex: `(?i)[\\w.-]{0,50}?(?:finicity)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{20})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "finicity"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "finnhub-access-token",
+      label: "Finnhub access token",
+      provider: "finnhub",
+      regex: `(?i)[\\w.-]{0,50}?(?:finnhub)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{20})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "finnhub"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "flickr-access-token",
+      label: "Flickr access token",
+      provider: "flickr",
+      regex: `(?i)[\\w.-]{0,50}?(?:flickr)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "flickr"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "flutterwave-encryption-key",
+      label: "Flutterwave encryption key",
+      provider: "flutterwave",
+      regex: "FLWSECK_TEST-(?i:[a-h0-9]{12})",
+      keywords: [
+        "flwseck_test"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 2
+    },
+    {
+      id: "flutterwave-public-key",
+      label: "Flutterwave public key",
+      provider: "flutterwave",
+      regex: "FLWPUBK_TEST-(?i:[a-h0-9]{32}-X)",
+      keywords: [
+        "flwpubk_test"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 2
+    },
+    {
+      id: "flutterwave-secret-key",
+      label: "Flutterwave secret key",
+      provider: "flutterwave",
+      regex: "FLWSECK_TEST-(?i:[a-h0-9]{32}-X)",
+      keywords: [
+        "flwseck_test"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 2
+    },
+    {
+      id: "flyio-access-token",
+      label: "Flyio access token",
+      provider: "flyio",
+      regex: `\\b((?:fo1_[\\w-]{43}|fm1[ar]_[a-zA-Z0-9+\\/]{100,}={0,3}|fm2_[a-zA-Z0-9+\\/]{100,}={0,3}))(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "fo1_",
+        "fm1",
+        "fm2_"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 4
+    },
+    {
+      id: "frameio-api-token",
+      label: "Frameio API token",
+      provider: "frameio",
+      regex: "fio-u-(?i:[a-z0-9\\-_=]{64})",
+      keywords: [
+        "fio-u-"
+      ],
+      source: "gitleaks",
+      confidence: "high"
+    },
+    {
+      id: "freemius-secret-key",
+      label: "Freemius secret key",
+      provider: "freemius",
+      regex: `(?i)["']secret_key["']\\s*=>\\s*["'](sk_[\\S]{29})["']`,
+      keywords: [
+        "secret_key"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      path: "(?i)\\.php$"
+    },
+    {
+      id: "freshbooks-access-token",
+      label: "Freshbooks access token",
+      provider: "freshbooks",
+      regex: `(?i)[\\w.-]{0,50}?(?:freshbooks)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "freshbooks"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "gcp-api-key",
+      label: "GCP API key",
+      provider: "gcp",
+      regex: `\\b(AIza[\\w-]{35})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "aiza"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 4,
+      allowlists: [
+        {
+          regexes: [
+            "AIzaSyabcdefghijklmnopqrstuvwxyz1234567",
+            "AIzaSyAnLA7NfeLquW1tJFpx_eQCxoX-oo6YyIs",
+            "AIzaSyCkEhVjf3pduRDt6d1yKOMitrUEke8agEM",
+            "AIzaSyDMAScliyLx7F0NPDEJi1QmyCgHIAODrlU",
+            "AIzaSyD3asb-2pEZVqMkmL6M9N6nHZRR_znhrh0",
+            "AIzayDNSXIbFmlXbIE6mCzDLQAqITYefhixbX4A",
+            "AIzaSyAdOS2zB6NCsk1pCdZ4-P6GBdi_UUPwX7c",
+            "AIzaSyASWm6HmTMdYWpgMnjRBjxcQ9CKctWmLd4",
+            "AIzaSyANUvH9H9BsUccjsu2pCmEkOPjjaXeDQgY",
+            "AIzaSyA5_iVawFQ8ABuTZNUdcwERLJv_a_p4wtM",
+            "AIzaSyA4UrcGxgwQFTfaI3no3t7Lt1sjmdnP5sQ",
+            "AIzaSyDSb51JiIcB6OJpwwMicseKRhhrOq1cS7g",
+            "AIzaSyBF2RrAIm4a0mO64EShQfqfd2AFnzAvvuU",
+            "AIzaSyBcE-OOIbhjyR83gm4r2MFCu4MJmprNXsw",
+            "AIzaSyB8qGxt4ec15vitgn44duC5ucxaOi4FmqE",
+            "AIzaSyA8vmApnrHNFE0bApF4hoZ11srVL_n0nvY"
+          ]
+        }
+      ]
+    },
+    {
+      id: "github-app-token",
+      label: "GitHub app token",
+      provider: "github",
+      regex: "(?:ghu|ghs)_[0-9a-zA-Z]{36}",
+      keywords: [
+        "ghu_",
+        "ghs_"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3,
+      allowlists: [
+        {
+          paths: [
+            "(?:^|/)@octokit/auth-token/README\\.md$"
+          ]
+        }
+      ]
+    },
+    {
+      id: "github-fine-grained-pat",
+      label: "GitHub fine grained PAT",
+      provider: "github",
+      regex: "github_pat_\\w{82}",
+      keywords: [
+        "github_pat_"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "github-oauth",
+      label: "GitHub OAuth",
+      provider: "github",
+      regex: "gho_[0-9a-zA-Z]{36}",
+      keywords: [
+        "gho_"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "github-pat",
+      label: "GitHub PAT",
+      provider: "github",
+      regex: "ghp_[0-9a-zA-Z]{36}",
+      keywords: [
+        "ghp_"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3,
+      allowlists: [
+        {
+          paths: [
+            "(?:^|/)@octokit/auth-token/README\\.md$"
+          ]
+        }
+      ]
+    },
+    {
+      id: "github-refresh-token",
+      label: "GitHub refresh token",
+      provider: "github",
+      regex: "ghr_[0-9a-zA-Z]{36}",
+      keywords: [
+        "ghr_"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "gitlab-cicd-job-token",
+      label: "GitLab cicd job token",
+      provider: "gitlab",
+      regex: "glcbt-[0-9a-zA-Z]{1,5}_[0-9a-zA-Z_-]{20}",
+      keywords: [
+        "glcbt-"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "gitlab-deploy-token",
+      label: "GitLab deploy token",
+      provider: "gitlab",
+      regex: "gldt-[0-9a-zA-Z_\\-]{20}",
+      keywords: [
+        "gldt-"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "gitlab-feature-flag-client-token",
+      label: "GitLab feature flag client token",
+      provider: "gitlab",
+      regex: "glffct-[0-9a-zA-Z_\\-]{20}",
+      keywords: [
+        "glffct-"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "gitlab-feed-token",
+      label: "GitLab feed token",
+      provider: "gitlab",
+      regex: "glft-[0-9a-zA-Z_\\-]{20}",
+      keywords: [
+        "glft-"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "gitlab-incoming-mail-token",
+      label: "GitLab incoming mail token",
+      provider: "gitlab",
+      regex: "glimt-[0-9a-zA-Z_\\-]{25}",
+      keywords: [
+        "glimt-"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "gitlab-kubernetes-agent-token",
+      label: "GitLab kubernetes agent token",
+      provider: "gitlab",
+      regex: "glagent-[0-9a-zA-Z_\\-]{50}",
+      keywords: [
+        "glagent-"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "gitlab-oauth-app-secret",
+      label: "GitLab OAuth app secret",
+      provider: "gitlab",
+      regex: "gloas-[0-9a-zA-Z_\\-]{64}",
+      keywords: [
+        "gloas-"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "gitlab-pat",
+      label: "GitLab PAT",
+      provider: "gitlab",
+      regex: "glpat-[\\w-]{20}",
+      keywords: [
+        "glpat-"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "gitlab-pat-routable",
+      label: "GitLab PAT routable",
+      provider: "gitlab",
+      regex: "\\bglpat-[0-9a-zA-Z_-]{27,300}\\.[0-9a-z]{2}[0-9a-z]{7}\\b",
+      keywords: [
+        "glpat-"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 4
+    },
+    {
+      id: "gitlab-ptt",
+      label: "GitLab ptt",
+      provider: "gitlab",
+      regex: "glptt-[0-9a-f]{40}",
+      keywords: [
+        "glptt-"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "gitlab-rrt",
+      label: "GitLab rrt",
+      provider: "gitlab",
+      regex: "GR1348941[\\w-]{20}",
+      keywords: [
+        "gr1348941"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "gitlab-runner-authentication-token",
+      label: "GitLab runner authentication token",
+      provider: "gitlab",
+      regex: "glrt-[0-9a-zA-Z_\\-]{20}",
+      keywords: [
+        "glrt-"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "gitlab-runner-authentication-token-routable",
+      label: "GitLab runner authentication token routable",
+      provider: "gitlab",
+      regex: "\\bglrt-t\\d_[0-9a-zA-Z_\\-]{27,300}\\.[0-9a-z]{2}[0-9a-z]{7}\\b",
+      keywords: [
+        "glrt-"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 4
+    },
+    {
+      id: "gitlab-scim-token",
+      label: "GitLab scim token",
+      provider: "gitlab",
+      regex: "glsoat-[0-9a-zA-Z_\\-]{20}",
+      keywords: [
+        "glsoat-"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "gitlab-session-cookie",
+      label: "GitLab session cookie",
+      provider: "gitlab",
+      regex: "_gitlab_session=[0-9a-z]{32}",
+      keywords: [
+        "_gitlab_session="
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "gitter-access-token",
+      label: "Gitter access token",
+      provider: "gitter",
+      regex: `(?i)[\\w.-]{0,50}?(?:gitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9_-]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "gitter"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "gocardless-api-token",
+      label: "Gocardless API token",
+      provider: "gocardless",
+      regex: `(?i)[\\w.-]{0,50}?(?:gocardless)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(live_(?i:[a-z0-9\\-_=]{40}))(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "live_",
+        "gocardless"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "grafana-api-key",
+      label: "Grafana API key",
+      provider: "grafana",
+      regex: `(?i)\\b(eyJrIjoi[A-Za-z0-9]{70,400}={0,3})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "eyjrijoi"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "grafana-cloud-api-token",
+      label: "Grafana cloud API token",
+      provider: "grafana",
+      regex: `(?i)\\b(glc_[A-Za-z0-9+/]{32,400}={0,3})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "glc_"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "grafana-service-account-token",
+      label: "Grafana service account token",
+      provider: "grafana",
+      regex: `(?i)\\b(glsa_[A-Za-z0-9]{32}_[A-Fa-f0-9]{8})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "glsa_"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "harness-api-key",
+      label: "Harness API key",
+      provider: "harness",
+      regex: "(?:pat|sat)\\.[a-zA-Z0-9_-]{22}\\.[a-zA-Z0-9]{24}\\.[a-zA-Z0-9]{20}",
+      keywords: [
+        "pat.",
+        "sat."
+      ],
+      source: "gitleaks",
+      confidence: "high"
+    },
+    {
+      id: "hashicorp-tf-api-token",
+      label: "Hashicorp tf API token",
+      provider: "hashicorp",
+      regex: "(?i)[a-z0-9]{14}\\.(?-i:atlasv1)\\.[a-z0-9\\-_=]{60,70}",
+      keywords: [
+        "atlasv1"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3.5
+    },
+    {
+      id: "hashicorp-tf-password",
+      label: "Hashicorp tf password",
+      provider: "hashicorp",
+      regex: `(?i)[\\w.-]{0,50}?(?:administrator_login_password|password)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}("[a-z0-9=_\\-]{8,20}")(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "administrator_login_password",
+        "password"
+      ],
+      source: "gitleaks",
+      confidence: "medium",
+      entropy: 2,
+      path: "(?i)\\.(?:tf|hcl)$"
+    },
+    {
+      id: "heroku-api-key",
+      label: "Heroku API key",
+      provider: "heroku",
+      regex: `(?i)[\\w.-]{0,50}?(?:heroku)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "heroku"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "heroku-api-key-v2",
+      label: "Heroku API key v2",
+      provider: "heroku",
+      regex: `\\b((HRKU-AA[0-9a-zA-Z_-]{58}))(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "hrku-aa"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 4
+    },
+    {
+      id: "hubspot-api-key",
+      label: "HubSpot API key",
+      provider: "hubspot",
+      regex: `(?i)[\\w.-]{0,50}?(?:hubspot)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "hubspot"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "huggingface-access-token",
+      label: "Huggingface access token",
+      provider: "huggingface",
+      regex: `\\b(hf_(?i:[a-z]{34}))(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "hf_"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 2
+    },
+    {
+      id: "huggingface-organization-api-token",
+      label: "Huggingface organization API token",
+      provider: "huggingface",
+      regex: `\\b(api_org_(?i:[a-z]{34}))(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "api_org_"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 2
+    },
+    {
+      id: "infracost-api-token",
+      label: "Infracost API token",
+      provider: "infracost",
+      regex: `\\b(ico-[a-zA-Z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "ico-"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "intercom-api-key",
+      label: "Intercom API key",
+      provider: "intercom",
+      regex: `(?i)[\\w.-]{0,50}?(?:intercom)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{60})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "intercom"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "intra42-client-secret",
+      label: "Intra42 client secret",
+      provider: "intra42",
+      regex: `\\b(s-s4t2(?:ud|af)-(?i:[abcdef0123456789]{64}))(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "intra",
+        "s-s4t2ud-",
+        "s-s4t2af-"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "jfrog-api-key",
+      label: "Jfrog API key",
+      provider: "jfrog",
+      regex: `(?i)[\\w.-]{0,50}?(?:jfrog|artifactory|bintray|xray)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{73})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "jfrog",
+        "artifactory",
+        "bintray",
+        "xray"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "jfrog-identity-token",
+      label: "Jfrog identity token",
+      provider: "jfrog",
+      regex: `(?i)[\\w.-]{0,50}?(?:jfrog|artifactory|bintray|xray)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "jfrog",
+        "artifactory",
+        "bintray",
+        "xray"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "jwt",
+      label: "JWT",
+      provider: "jwt",
+      regex: `\\b(ey[a-zA-Z0-9]{17,}\\.ey[a-zA-Z0-9\\/\\\\_-]{17,}\\.(?:[a-zA-Z0-9\\/\\\\_-]{10,}={0,2})?)(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "ey"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "jwt-base64",
+      label: "JWT base64",
+      provider: "jwt",
+      regex: "\\bZXlK(?:(?<alg>aGJHY2lPaU)|(?<apu>aGNIVWlPaU)|(?<apv>aGNIWWlPaU)|(?<aud>aGRXUWlPaU)|(?<b64>aU5qUWlP)|(?<crit>amNtbDBJanBi)|(?<cty>amRIa2lPaU)|(?<epk>bGNHc2lPbn)|(?<enc>bGJtTWlPaU)|(?<jku>cWEzVWlPaU)|(?<jwk>cWQyc2lPb)|(?<iss>cGMzTWlPaU)|(?<iv>cGRpSTZJ)|(?<kid>cmFXUWlP)|(?<key_ops>clpYbGZiM0J6SWpwY)|(?<kty>cmRIa2lPaUp)|(?<nonce>dWIyNWpaU0k2)|(?<p2c>d01tTWlP)|(?<p2s>d01uTWlPaU)|(?<ppt>d2NIUWlPaU)|(?<sub>emRXSWlPaU)|(?<svt>emRuUWlP)|(?<tag>MFlXY2lPaU)|(?<typ>MGVYQWlPaUp)|(?<url>MWNtd2l)|(?<use>MWMyVWlPaUp)|(?<ver>MlpYSWlPaU)|(?<version>MlpYSnphVzl1SWpv)|(?<x>NElqb2)|(?<x5c>NE5XTWlP)|(?<x5t>NE5YUWlPaU)|(?<x5ts256>NE5YUWpVekkxTmlJNkl)|(?<x5u>NE5YVWlPaU)|(?<zip>NmFYQWlPaU))[a-zA-Z0-9\\/\\\\_+\\-\\r\\n]{40,}={0,2}",
+      keywords: [
+        "zxlk"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 2
+    },
+    {
+      id: "kraken-access-token",
+      label: "Kraken access token",
+      provider: "kraken",
+      regex: `(?i)[\\w.-]{0,50}?(?:kraken)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9\\/=_\\+\\-]{80,90})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "kraken"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "kubernetes-secret-yaml",
+      label: "Kubernetes secret yaml",
+      provider: "kubernetes",
+      regex: `(?i)(?:\\bkind:[ \\t]*["']?\\bsecret\\b["']?(?s:.){0,200}?\\bdata:(?s:.){0,100}?\\s+([\\w.-]+:(?:[ \\t]*(?:\\||>[-+]?)\\s+)?[ \\t]*(?:["']?[a-z0-9+/]{10,}={0,3}["']?|\\{\\{[ \\t\\w"|$:=,.-]+}}|""|''))|\\bdata:(?s:.){0,100}?\\s+([\\w.-]+:(?:[ \\t]*(?:\\||>[-+]?)\\s+)?[ \\t]*(?:["']?[a-z0-9+/]{10,}={0,3}["']?|\\{\\{[ \\t\\w"|$:=,.-]+}}|""|''))(?s:.){0,200}?\\bkind:[ \\t]*["']?\\bsecret\\b["']?)`,
+      keywords: [
+        "secret"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      multiline: true,
+      path: "(?i)\\.ya?ml$",
+      allowlists: [
+        {
+          regexes: [
+            `[\\w.-]+:(?:[ \\t]*(?:\\||>[-+]?)\\s+)?[ \\t]*(?:\\{\\{[ \\t\\w"|$:=,.-]+}}|""|'')`
+          ]
+        },
+        {
+          regexTarget: "match",
+          regexes: [
+            "(kind:(?s:.)+\\n---\\n(?s:.)+\\bdata:|data:(?s:.)+\\n---\\n(?s:.)+\\bkind:)"
+          ]
+        }
+      ]
+    },
+    {
+      id: "kucoin-access-token",
+      label: "Kucoin access token",
+      provider: "kucoin",
+      regex: `(?i)[\\w.-]{0,50}?(?:kucoin)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{24})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "kucoin"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "kucoin-secret-key",
+      label: "Kucoin secret key",
+      provider: "kucoin",
+      regex: `(?i)[\\w.-]{0,50}?(?:kucoin)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "kucoin"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "launchdarkly-access-token",
+      label: "Launchdarkly access token",
+      provider: "launchdarkly",
+      regex: `(?i)[\\w.-]{0,50}?(?:launchdarkly)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "launchdarkly"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "linear-api-key",
+      label: "Linear API key",
+      provider: "linear",
+      regex: "lin_api_(?i:[a-z0-9]{40})",
+      keywords: [
+        "lin_api_"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 2
+    },
+    {
+      id: "linear-client-secret",
+      label: "Linear client secret",
+      provider: "linear",
+      regex: `(?i)[\\w.-]{0,50}?(?:linear)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "linear"
+      ],
+      source: "gitleaks",
+      confidence: "medium",
+      entropy: 2
+    },
+    {
+      id: "linkedin-client-id",
+      label: "LinkedIn client ID",
+      provider: "linkedin",
+      regex: `(?i)[\\w.-]{0,50}?(?:linked[_-]?in)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{14})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "linkedin",
+        "linked_in",
+        "linked-in"
+      ],
+      source: "gitleaks",
+      confidence: "medium",
+      entropy: 2
+    },
+    {
+      id: "linkedin-client-secret",
+      label: "LinkedIn client secret",
+      provider: "linkedin",
+      regex: `(?i)[\\w.-]{0,50}?(?:linked[_-]?in)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "linkedin",
+        "linked_in",
+        "linked-in"
+      ],
+      source: "gitleaks",
+      confidence: "medium",
+      entropy: 2
+    },
+    {
+      id: "lob-api-key",
+      label: "Lob API key",
+      provider: "lob",
+      regex: `(?i)[\\w.-]{0,50}?(?:lob)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}((live|test)_[a-f0-9]{35})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "test_",
+        "live_"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "lob-pub-api-key",
+      label: "Lob pub API key",
+      provider: "lob",
+      regex: `(?i)[\\w.-]{0,50}?(?:lob)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}((test|live)_pub_[a-f0-9]{31})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "test_pub",
+        "live_pub",
+        "_pub"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "looker-client-id",
+      label: "Looker client ID",
+      provider: "looker",
+      regex: `(?i)[\\w.-]{0,50}?(?:looker)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{20})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "looker"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "looker-client-secret",
+      label: "Looker client secret",
+      provider: "looker",
+      regex: `(?i)[\\w.-]{0,50}?(?:looker)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{24})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "looker"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "mailchimp-api-key",
+      label: "Mailchimp API key",
+      provider: "mailchimp",
+      regex: `(?i)[\\w.-]{0,50}?(?:MailchimpSDK.initialize|mailchimp)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{32}-us\\d\\d)(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "mailchimp"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "mailgun-private-api-token",
+      label: "Mailgun private API token",
+      provider: "mailgun",
+      regex: `(?i)[\\w.-]{0,50}?(?:mailgun)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(key-[a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "mailgun"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "mailgun-pub-key",
+      label: "Mailgun pub key",
+      provider: "mailgun",
+      regex: `(?i)[\\w.-]{0,50}?(?:mailgun)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(pubkey-[a-f0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "mailgun"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "mailgun-signing-key",
+      label: "Mailgun signing key",
+      provider: "mailgun",
+      regex: `(?i)[\\w.-]{0,50}?(?:mailgun)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-h0-9]{32}-[a-h0-9]{8}-[a-h0-9]{8})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "mailgun"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "mapbox-api-token",
+      label: "Mapbox API token",
+      provider: "mapbox",
+      regex: `(?i)[\\w.-]{0,50}?(?:mapbox)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(pk\\.[a-z0-9]{60}\\.[a-z0-9]{22})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "mapbox"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "mattermost-access-token",
+      label: "Mattermost access token",
+      provider: "mattermost",
+      regex: `(?i)[\\w.-]{0,50}?(?:mattermost)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{26})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "mattermost"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "maxmind-license-key",
+      label: "Maxmind license key",
+      provider: "maxmind",
+      regex: `\\b([A-Za-z0-9]{6}_[A-Za-z0-9]{29}_mmk)(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "_mmk"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 4
+    },
+    {
+      id: "messagebird-api-token",
+      label: "Messagebird API token",
+      provider: "messagebird",
+      regex: `(?i)[\\w.-]{0,50}?(?:message[_-]?bird)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{25})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "messagebird",
+        "message-bird",
+        "message_bird"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "messagebird-client-id",
+      label: "Messagebird client ID",
+      provider: "messagebird",
+      regex: `(?i)[\\w.-]{0,50}?(?:message[_-]?bird)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "messagebird",
+        "message-bird",
+        "message_bird"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "microsoft-teams-webhook",
+      label: "Microsoft teams webhook",
+      provider: "microsoft",
+      regex: "https://[a-z0-9]+\\.webhook\\.office\\.com/webhookb2/[a-z0-9]{8}-([a-z0-9]{4}-){3}[a-z0-9]{12}@[a-z0-9]{8}-([a-z0-9]{4}-){3}[a-z0-9]{12}/IncomingWebhook/[a-z0-9]{32}/[a-z0-9]{8}-([a-z0-9]{4}-){3}[a-z0-9]{12}",
+      keywords: [
+        "webhook.office.com",
+        "webhookb2",
+        "incomingwebhook"
+      ],
+      source: "gitleaks",
+      confidence: "high"
+    },
+    {
+      id: "netlify-access-token",
+      label: "Netlify access token",
+      provider: "netlify",
+      regex: `(?i)[\\w.-]{0,50}?(?:netlify)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{40,46})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "netlify"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "new-relic-browser-api-token",
+      label: "New relic browser API token",
+      provider: "new",
+      regex: `(?i)[\\w.-]{0,50}?(?:new-relic|newrelic|new_relic)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(NRJS-[a-f0-9]{19})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "nrjs-"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "new-relic-insert-key",
+      label: "New relic insert key",
+      provider: "new",
+      regex: `(?i)[\\w.-]{0,50}?(?:new-relic|newrelic|new_relic)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(NRII-[a-z0-9-]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "nrii-"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "new-relic-user-api-id",
+      label: "New relic user API ID",
+      provider: "new",
+      regex: `(?i)[\\w.-]{0,50}?(?:new-relic|newrelic|new_relic)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "new-relic",
+        "newrelic",
+        "new_relic"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "new-relic-user-api-key",
+      label: "New relic user API key",
+      provider: "new",
+      regex: `(?i)[\\w.-]{0,50}?(?:new-relic|newrelic|new_relic)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(NRAK-[a-z0-9]{27})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "nrak"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "notion-api-token",
+      label: "Notion API token",
+      provider: "notion",
+      regex: `\\b(ntn_[0-9]{11}[A-Za-z0-9]{32}[A-Za-z0-9]{3})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "ntn_"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 4
+    },
+    {
+      id: "npm-access-token",
+      label: "Npm access token",
+      provider: "npm",
+      regex: `(?i)\\b(npm_[a-z0-9]{36})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "npm_"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 2
+    },
+    {
+      id: "nuget-config-password",
+      label: "Nuget config password",
+      provider: "nuget",
+      regex: '(?i)<add key=\\"(?:(?:ClearText)?Password)\\"\\s*value=\\"(.{8,})\\"\\s*/>',
+      keywords: [
+        "<add key="
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 1,
+      path: "(?i)nuget\\.config$",
+      allowlists: [
+        {
+          regexes: [
+            "33f!!lloppa",
+            "hal\\+9ooo_da!sY",
+            "^\\%\\S.*\\%$"
+          ]
+        }
+      ]
+    },
+    {
+      id: "nytimes-access-token",
+      label: "Nytimes access token",
+      provider: "nytimes",
+      regex: `(?i)[\\w.-]{0,50}?(?:nytimes|new-york-times,|newyorktimes)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9=_\\-]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "nytimes",
+        "new-york-times",
+        "newyorktimes"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "octopus-deploy-api-key",
+      label: "Octopus deploy API key",
+      provider: "octopus",
+      regex: `\\b(API-[A-Z0-9]{26})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "api-"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "okta-access-token",
+      label: "Okta access token",
+      provider: "okta",
+      regex: `[\\w.-]{0,50}?(?i:[\\w.-]{0,50}?(?:(?-i:[Oo]kta|OKTA))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3})(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(00[\\w=\\-]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "okta"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 4
+    },
+    {
+      id: "openai-api-key",
+      label: "OpenAI API key",
+      provider: "openai",
+      regex: `\\b(sk-(?:proj|svcacct|admin)-(?:[A-Za-z0-9_-]{74}|[A-Za-z0-9_-]{58})T3BlbkFJ(?:[A-Za-z0-9_-]{74}|[A-Za-z0-9_-]{58})\\b|sk-[a-zA-Z0-9]{20}T3BlbkFJ[a-zA-Z0-9]{20})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "t3blbkfj"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "openshift-user-token",
+      label: "Openshift user token",
+      provider: "openshift",
+      regex: "\\b(sha256~[\\w-]{43})(?:[^\\w-]|(?![\\s\\S]))",
+      keywords: [
+        "sha256~"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3.5
+    },
+    {
+      id: "perplexity-api-key",
+      label: "Perplexity API key",
+      provider: "perplexity",
+      regex: `\\b(pplx-[a-zA-Z0-9]{48})(?:[\\x60'"\\s;]|\\\\[nr]|$|\\b)`,
+      keywords: [
+        "pplx-"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 4
+    },
+    {
+      id: "plaid-api-token",
+      label: "Plaid API token",
+      provider: "plaid",
+      regex: `(?i)[\\w.-]{0,50}?(?:plaid)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(access-(?:sandbox|development|production)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "plaid"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "plaid-client-id",
+      label: "Plaid client ID",
+      provider: "plaid",
+      regex: `(?i)[\\w.-]{0,50}?(?:plaid)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{24})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "plaid"
+      ],
+      source: "gitleaks",
+      confidence: "medium",
+      entropy: 3.5
+    },
+    {
+      id: "plaid-secret-key",
+      label: "Plaid secret key",
+      provider: "plaid",
+      regex: `(?i)[\\w.-]{0,50}?(?:plaid)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{30})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "plaid"
+      ],
+      source: "gitleaks",
+      confidence: "medium",
+      entropy: 3.5
+    },
+    {
+      id: "planetscale-api-token",
+      label: "Planetscale API token",
+      provider: "planetscale",
+      regex: `\\b(pscale_tkn_(?i:[\\w=\\.-]{32,64}))(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "pscale_tkn_"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "planetscale-oauth-token",
+      label: "Planetscale OAuth token",
+      provider: "planetscale",
+      regex: `\\b(pscale_oauth_[\\w=\\.-]{32,64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "pscale_oauth_"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "planetscale-password",
+      label: "Planetscale password",
+      provider: "planetscale",
+      regex: `(?i)\\b(pscale_pw_(?i:[\\w=\\.-]{32,64}))(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "pscale_pw_"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "postman-api-token",
+      label: "Postman API token",
+      provider: "postman",
+      regex: `\\b(PMAK-(?i:[a-f0-9]{24}\\-[a-f0-9]{34}))(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "pmak-"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "prefect-api-token",
+      label: "Prefect API token",
+      provider: "prefect",
+      regex: `\\b(pnu_[a-zA-Z0-9]{36})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "pnu_"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 2
+    },
+    {
+      id: "privateai-api-token",
+      label: "Privateai API token",
+      provider: "privateai",
+      regex: `[\\w.-]{0,50}?(?i:[\\w.-]{0,50}?(?:private[_-]?ai)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3})(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "privateai",
+        "private_ai",
+        "private-ai"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "pulumi-api-token",
+      label: "Pulumi API token",
+      provider: "pulumi",
+      regex: `\\b(pul-[a-f0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "pul-"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 2
+    },
+    {
+      id: "pypi-upload-token",
+      label: "PyPI upload token",
+      provider: "pypi",
+      regex: "pypi-AgEIcHlwaS5vcmc[\\w-]{50,1000}",
+      keywords: [
+        "pypi-ageichlwas5vcmc"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "rapidapi-access-token",
+      label: "Rapidapi access token",
+      provider: "rapidapi",
+      regex: `(?i)[\\w.-]{0,50}?(?:rapidapi)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9_-]{50})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "rapidapi"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "readme-api-token",
+      label: "Readme API token",
+      provider: "readme",
+      regex: `\\b(rdme_[a-z0-9]{70})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "rdme_"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 2
+    },
+    {
+      id: "rubygems-api-token",
+      label: "Rubygems API token",
+      provider: "rubygems",
+      regex: `\\b(rubygems_[a-f0-9]{48})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "rubygems_"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 2
+    },
+    {
+      id: "scalingo-api-token",
+      label: "Scalingo API token",
+      provider: "scalingo",
+      regex: `\\b(tk-us-[\\w-]{48})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "tk-us-"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 2
+    },
+    {
+      id: "sendbird-access-id",
+      label: "Sendbird access ID",
+      provider: "sendbird",
+      regex: `(?i)[\\w.-]{0,50}?(?:sendbird)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "sendbird"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "sendbird-access-token",
+      label: "Sendbird access token",
+      provider: "sendbird",
+      regex: `(?i)[\\w.-]{0,50}?(?:sendbird)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "sendbird"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "sendgrid-api-token",
+      label: "SendGrid API token",
+      provider: "sendgrid",
+      regex: `\\b(SG\\.(?i:[a-z0-9=_\\-\\.]{66}))(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "sg."
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 2
+    },
+    {
+      id: "sendinblue-api-token",
+      label: "Sendinblue API token",
+      provider: "sendinblue",
+      regex: `\\b(xkeysib-[a-f0-9]{64}\\-(?i:[a-z0-9]{16}))(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "xkeysib-"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 2
+    },
+    {
+      id: "sentry-access-token",
+      label: "Sentry access token",
+      provider: "sentry",
+      regex: `(?i)[\\w.-]{0,50}?(?:sentry)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "sentry"
+      ],
+      source: "gitleaks",
+      confidence: "medium",
+      entropy: 3
+    },
+    {
+      id: "sentry-org-token",
+      label: "Sentry org token",
+      provider: "sentry",
+      regex: "\\bsntrys_eyJpYXQiO[a-zA-Z0-9+/]{10,200}(?:LCJyZWdpb25fdXJs|InJlZ2lvbl91cmwi|cmVnaW9uX3VybCI6)[a-zA-Z0-9+/]{10,200}={0,2}_[a-zA-Z0-9+/]{43}(?:[^a-zA-Z0-9+/]|(?![\\s\\S]))",
+      keywords: [
+        "sntrys_eyjpyxqio"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 4.5
+    },
+    {
+      id: "sentry-user-token",
+      label: "Sentry user token",
+      provider: "sentry",
+      regex: `\\b(sntryu_[a-f0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "sntryu_"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3.5
+    },
+    {
+      id: "settlemint-application-access-token",
+      label: "Settlemint application access token",
+      provider: "settlemint",
+      regex: `\\b(sm_aat_[a-zA-Z0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "sm_aat"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "settlemint-personal-access-token",
+      label: "Settlemint personal access token",
+      provider: "settlemint",
+      regex: `\\b(sm_pat_[a-zA-Z0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "sm_pat"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "settlemint-service-access-token",
+      label: "Settlemint service access token",
+      provider: "settlemint",
+      regex: `\\b(sm_sat_[a-zA-Z0-9]{16})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "sm_sat"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "shippo-api-token",
+      label: "Shippo API token",
+      provider: "shippo",
+      regex: `\\b(shippo_(?:live|test)_[a-fA-F0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "shippo_"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 2
+    },
+    {
+      id: "shopify-access-token",
+      label: "Shopify access token",
+      provider: "shopify",
+      regex: "shpat_[a-fA-F0-9]{32}",
+      keywords: [
+        "shpat_"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 2
+    },
+    {
+      id: "shopify-custom-access-token",
+      label: "Shopify custom access token",
+      provider: "shopify",
+      regex: "shpca_[a-fA-F0-9]{32}",
+      keywords: [
+        "shpca_"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 2
+    },
+    {
+      id: "shopify-private-app-access-token",
+      label: "Shopify private app access token",
+      provider: "shopify",
+      regex: "shppa_[a-fA-F0-9]{32}",
+      keywords: [
+        "shppa_"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 2
+    },
+    {
+      id: "shopify-shared-secret",
+      label: "Shopify shared secret",
+      provider: "shopify",
+      regex: "shpss_[a-fA-F0-9]{32}",
+      keywords: [
+        "shpss_"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 2
+    },
+    {
+      id: "sidekiq-secret",
+      label: "Sidekiq secret",
+      provider: "sidekiq",
+      regex: `(?i)[\\w.-]{0,50}?(?:BUNDLE_ENTERPRISE__CONTRIBSYS__COM|BUNDLE_GEMS__CONTRIBSYS__COM)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-f0-9]{8}:[a-f0-9]{8})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "bundle_enterprise__contribsys__com",
+        "bundle_gems__contribsys__com"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "sidekiq-sensitive-url",
+      label: "Sidekiq sensitive URL",
+      provider: "sidekiq",
+      regex: "(?i)\\bhttps?://([a-f0-9]{8}:[a-f0-9]{8})@(?:gems.contribsys.com|enterprise.contribsys.com)(?:[\\/|\\#|\\?|:]|$)",
+      keywords: [
+        "gems.contribsys.com",
+        "enterprise.contribsys.com"
+      ],
+      source: "gitleaks",
+      confidence: "high"
+    },
+    {
+      id: "slack-app-token",
+      label: "Slack app token",
+      provider: "slack",
+      regex: "(?i)xapp-\\d-[A-Z0-9]+-\\d+-[a-z0-9]+",
+      keywords: [
+        "xapp"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 2
+    },
+    {
+      id: "slack-bot-token",
+      label: "Slack bot token",
+      provider: "slack",
+      regex: "xoxb-[0-9]{10,13}-[0-9]{10,13}[a-zA-Z0-9-]*",
+      keywords: [
+        "xoxb"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "slack-config-access-token",
+      label: "Slack config access token",
+      provider: "slack",
+      regex: "(?i)xoxe.xox[bp]-\\d-[A-Z0-9]{163,166}",
+      keywords: [
+        "xoxe.xoxb-",
+        "xoxe.xoxp-"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 2
+    },
+    {
+      id: "slack-config-refresh-token",
+      label: "Slack config refresh token",
+      provider: "slack",
+      regex: "(?i)xoxe-\\d-[A-Z0-9]{146}",
+      keywords: [
+        "xoxe-"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 2
+    },
+    {
+      id: "slack-legacy-bot-token",
+      label: "Slack legacy bot token",
+      provider: "slack",
+      regex: "xoxb-[0-9]{8,14}-[a-zA-Z0-9]{18,26}",
+      keywords: [
+        "xoxb"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 2
+    },
+    {
+      id: "slack-legacy-token",
+      label: "Slack legacy token",
+      provider: "slack",
+      regex: "xox[os]-\\d+-\\d+-\\d+-[a-fA-F\\d]+",
+      keywords: [
+        "xoxo",
+        "xoxs"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 2
+    },
+    {
+      id: "slack-legacy-workspace-token",
+      label: "Slack legacy workspace token",
+      provider: "slack",
+      regex: "xox[ar]-(?:\\d-)?[0-9a-zA-Z]{8,48}",
+      keywords: [
+        "xoxa",
+        "xoxr"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 2
+    },
+    {
+      id: "slack-user-token",
+      label: "Slack user token",
+      provider: "slack",
+      regex: "xox[pe](?:-[0-9]{10,13}){3}-[a-zA-Z0-9-]{28,34}",
+      keywords: [
+        "xoxp-",
+        "xoxe-"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 2
+    },
+    {
+      id: "slack-webhook-url",
+      label: "Slack webhook URL",
+      provider: "slack",
+      regex: "(?:https?://)?hooks.slack.com/(?:services|workflows|triggers)/[A-Za-z0-9+/]{43,56}",
+      keywords: [
+        "hooks.slack.com"
+      ],
+      source: "gitleaks",
+      confidence: "high"
+    },
+    {
+      id: "snyk-api-token",
+      label: "Snyk API token",
+      provider: "snyk",
+      regex: `(?i)[\\w.-]{0,50}?(?:snyk[_.-]?(?:(?:api|oauth)[_.-]?)?(?:key|token))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "snyk"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "sonar-api-token",
+      label: "Sonar API token",
+      provider: "sonar",
+      regex: `(?i)[\\w.-]{0,50}?(?:sonar[_.-]?(login|token))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}((?:squ_|sqp_|sqa_)?[a-z0-9=_\\-]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "sonar"
+      ],
+      source: "gitleaks",
+      confidence: "medium",
+      secretGroup: 2
+    },
+    {
+      id: "sourcegraph-access-token",
+      label: "Sourcegraph access token",
+      provider: "sourcegraph",
+      regex: `(?i)\\b(\\b(sgp_(?:[a-fA-F0-9]{16}|local)_[a-fA-F0-9]{40}|sgp_[a-fA-F0-9]{40}|[a-fA-F0-9]{40})\\b)(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "sgp_",
+        "sourcegraph"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "square-access-token",
+      label: "Square access token",
+      provider: "square",
+      regex: `\\b((?:EAAA|sq0atp-)[\\w-]{22,60})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "sq0atp-",
+        "eaaa"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 2
+    },
+    {
+      id: "squarespace-access-token",
+      label: "Squarespace access token",
+      provider: "squarespace",
+      regex: `(?i)[\\w.-]{0,50}?(?:squarespace)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "squarespace"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "stripe-access-token",
+      label: "Stripe access token",
+      provider: "stripe",
+      regex: `\\b((?:sk|rk)_(?:test|live|prod)_[a-zA-Z0-9]{10,99})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "sk_test",
+        "sk_live",
+        "sk_prod",
+        "rk_test",
+        "rk_live",
+        "rk_prod"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 2
+    },
+    {
+      id: "sumologic-access-id",
+      label: "Sumologic access ID",
+      provider: "sumologic",
+      regex: `[\\w.-]{0,50}?(?i:[\\w.-]{0,50}?(?:(?-i:[Ss]umo|SUMO))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3})(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(su[a-zA-Z0-9]{12})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "sumo"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "sumologic-access-token",
+      label: "Sumologic access token",
+      provider: "sumologic",
+      regex: `(?i)[\\w.-]{0,50}?(?:(?-i:[Ss]umo|SUMO))(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{64})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "sumo"
+      ],
+      source: "gitleaks",
+      confidence: "medium",
+      entropy: 3
+    },
+    {
+      id: "telegram-bot-api-token",
+      label: "Telegram bot API token",
+      provider: "telegram",
+      regex: `(?i)[\\w.-]{0,50}?(?:telegr)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9]{5,16}:(?-i:A)[a-z0-9_\\-]{34})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "telegr"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "travisci-access-token",
+      label: "Travisci access token",
+      provider: "travisci",
+      regex: `(?i)[\\w.-]{0,50}?(?:travis)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{22})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "travis"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "twilio-api-key",
+      label: "Twilio API key",
+      provider: "twilio",
+      regex: "SK[0-9a-fA-F]{32}",
+      keywords: [
+        "sk"
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3
+    },
+    {
+      id: "twitch-api-token",
+      label: "Twitch API token",
+      provider: "twitch",
+      regex: `(?i)[\\w.-]{0,50}?(?:twitch)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{30})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "twitch"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "twitter-access-secret",
+      label: "Twitter access secret",
+      provider: "twitter",
+      regex: `(?i)[\\w.-]{0,50}?(?:twitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{45})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "twitter"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "twitter-access-token",
+      label: "Twitter access token",
+      provider: "twitter",
+      regex: `(?i)[\\w.-]{0,50}?(?:twitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([0-9]{15,25}-[a-zA-Z0-9]{20,40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "twitter"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "twitter-api-key",
+      label: "Twitter API key",
+      provider: "twitter",
+      regex: `(?i)[\\w.-]{0,50}?(?:twitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{25})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "twitter"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "twitter-api-secret",
+      label: "Twitter API secret",
+      provider: "twitter",
+      regex: `(?i)[\\w.-]{0,50}?(?:twitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{50})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "twitter"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "twitter-bearer-token",
+      label: "Twitter bearer token",
+      provider: "twitter",
+      regex: `(?i)[\\w.-]{0,50}?(?:twitter)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(A{22}[a-zA-Z0-9%]{80,100})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "twitter"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "typeform-api-token",
+      label: "Typeform API token",
+      provider: "typeform",
+      regex: `(?i)[\\w.-]{0,50}?(?:typeform)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(tfp_[a-z0-9\\-_\\.=]{59})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "tfp_"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "vault-batch-token",
+      label: "Vault batch token",
+      provider: "vault",
+      regex: `\\b(hvb\\.[\\w-]{138,300})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "hvb."
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 4
+    },
+    {
+      id: "vault-service-token",
+      label: "Vault service token",
+      provider: "vault",
+      regex: `\\b((?:hvs\\.[\\w-]{90,120}|s\\.(?i:[a-z0-9]{24})))(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "hvs.",
+        "s."
+      ],
+      source: "gitleaks",
+      confidence: "high",
+      entropy: 3.5,
+      allowlists: [
+        {
+          regexes: [
+            "s\\.[A-Za-z]{24}"
+          ]
+        }
+      ]
+    },
+    {
+      id: "yandex-access-token",
+      label: "Yandex access token",
+      provider: "yandex",
+      regex: `(?i)[\\w.-]{0,50}?(?:yandex)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(t1\\.[A-Z0-9a-z_-]+[=]{0,2}\\.[A-Z0-9a-z_-]{86}[=]{0,2})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "yandex"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "yandex-api-key",
+      label: "Yandex API key",
+      provider: "yandex",
+      regex: `(?i)[\\w.-]{0,50}?(?:yandex)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(AQVN[A-Za-z0-9_\\-]{35,38})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "yandex"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "yandex-aws-access-token",
+      label: "Yandex AWS access token",
+      provider: "yandex",
+      regex: `(?i)[\\w.-]{0,50}?(?:yandex)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}(YC[a-zA-Z0-9_\\-]{38})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "yandex"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    },
+    {
+      id: "zendesk-secret-key",
+      label: "Zendesk secret key",
+      provider: "zendesk",
+      regex: `(?i)[\\w.-]{0,50}?(?:zendesk)(?:[ \\t\\w.-]{0,20})[\\s'"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'"\\s=]{0,5}([a-z0-9]{40})(?:[\\x60'"\\s;]|\\\\[nr]|$)`,
+      keywords: [
+        "zendesk"
+      ],
+      source: "gitleaks",
+      confidence: "medium"
+    }
+  ]
+};
+
+// server/detect/rules/tripwire.ts
+var rule = (r) => ({ ...r, source: "tripwire" });
+var tripwirePack = {
+  source: "tripwire",
+  rules: [
+    // Only a complete BEGIN..END block counts; a bare header in docs or a truncated example does not.
+    rule({ id: "private-key", label: "Private key", provider: "ssh", multiline: true, regex: "-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----[\\w+/=:,.\\s-]{40,}?-----END (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----", keywords: ["private key"] }),
+    rule({ id: "aws-access-key", label: "AWS access key ID", provider: "aws", regex: "\\b((?:AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16})\\b", keywords: ["akia", "asia", "abia", "acca"] }),
+    rule({ id: "aws-secret-key", label: "AWS secret access key", provider: "aws", regex: `(?i)aws_?secret_?(?:access_?)?key["']?\\s*[:=]\\s*["']?([A-Za-z0-9/+=]{40})\\b`, keywords: ["aws"] }),
+    rule({ id: "github-pat", label: "GitHub token", provider: "github", regex: "\\b((?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,255})\\b", keywords: ["ghp_", "gho_", "ghu_", "ghs_", "ghr_"], check: "github-checksum" }),
+    rule({ id: "github-fine-grained", label: "GitHub fine-grained token", provider: "github", regex: "\\b(github_pat_[A-Za-z0-9_]{60,255})\\b", keywords: ["github_pat_"] }),
+    rule({ id: "gitlab-pat", label: "GitLab token", provider: "gitlab", regex: "\\b(glpat-[A-Za-z0-9_-]{20,})\\b", keywords: ["glpat-"] }),
+    rule({ id: "stripe-live", label: "Stripe live key", provider: "stripe", regex: "\\b((?:sk|rk)_live_[A-Za-z0-9]{20,})\\b", keywords: ["sk_live_", "rk_live_"] }),
+    rule({ id: "stripe-test", label: "Stripe test key", provider: "stripe-test", regex: "\\b((?:sk|rk)_test_[A-Za-z0-9]{20,})\\b", keywords: ["sk_test_", "rk_test_"] }),
+    rule({ id: "slack-token", label: "Slack token", provider: "slack", regex: "\\b(xox[baprs]-[A-Za-z0-9-]{10,})\\b", keywords: ["xox"] }),
+    rule({ id: "slack-webhook", label: "Slack webhook", provider: "slack", regex: "(https:\\/\\/hooks\\.slack\\.com\\/services\\/T[A-Za-z0-9_]+\\/B[A-Za-z0-9_]+\\/[A-Za-z0-9_]+)", keywords: ["hooks.slack.com"] }),
+    rule({ id: "google-api-key", label: "Google API key", provider: "gcp", regex: "\\b(AIza[0-9A-Za-z_-]{35})\\b", keywords: ["aiza"] }),
+    rule({ id: "anthropic-key", label: "Anthropic API key", provider: "anthropic", regex: "\\b(sk-ant-[A-Za-z0-9_-]{32,})\\b", keywords: ["sk-ant-"] }),
+    rule({ id: "openai-key", label: "OpenAI API key", provider: "openai", regex: "\\b(sk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}T3BlbkFJ[A-Za-z0-9_-]{20,})\\b", keywords: ["t3blbkfj"] }),
+    rule({ id: "sendgrid-key", label: "SendGrid API key", provider: "sendgrid", regex: "\\b(SG\\.[A-Za-z0-9_-]{22}\\.[A-Za-z0-9_-]{43})\\b", keywords: ["sg."] }),
+    rule({ id: "twilio-key", label: "Twilio API key", provider: "twilio", regex: "\\b(SK[0-9a-f]{32})\\b", keywords: ["sk"] }),
+    rule({ id: "npm-token", label: "npm access token", provider: "npm", regex: "\\b(npm_[A-Za-z0-9]{36})\\b", keywords: ["npm_"] }),
+    // Same block as it appears inside a JSON string (GCP service-account files), with literal \n escapes instead of newlines.
+    rule({ id: "private-key-escaped", label: "Private key (escaped in JSON)", provider: "ssh", regex: "-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----[A-Za-z0-9+/=\\\\]{40,}?-----END (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----", keywords: ["private key"] }),
+    rule({ id: "dockerhub-pat", label: "Docker Hub token", provider: "docker", regex: "\\b(dckr_pat_[A-Za-z0-9_-]{27,})\\b", keywords: ["dckr_pat_"] }),
+    rule({ id: "replicate-token", label: "Replicate API token", provider: "replicate", regex: "\\b(r8_[A-Za-z0-9]{37})\\b", keywords: ["r8_"] }),
+    rule({ id: "groq-key", label: "Groq API key", provider: "groq", regex: "\\b(gsk_[A-Za-z0-9]{52})\\b", keywords: ["gsk_"] }),
+    rule({ id: "xai-key", label: "xAI API key", provider: "xai", regex: "\\b(xai-[A-Za-z0-9]{70,})\\b", keywords: ["xai-"] }),
+    rule({ id: "supabase-token", label: "Supabase access token", provider: "supabase", regex: "\\b(sbp_[a-f0-9]{40})\\b", keywords: ["sbp_"] }),
+    rule({ id: "figma-token", label: "Figma access token", provider: "figma", regex: "\\b(figd_[A-Za-z0-9_-]{40})\\b", keywords: ["figd_"] }),
+    rule({ id: "neon-key", label: "Neon API key", provider: "neon", regex: "\\b(napi_[a-z0-9]{64})\\b", keywords: ["napi_"] }),
+    rule({ id: "azure-storage-key", label: "Azure storage account key", provider: "azure", regex: "AccountKey=([A-Za-z0-9+/]{86}==)", keywords: ["accountkey="] }),
+    // The password group is what gets checked; the whole URL is what gets reported.
+    rule({ id: "db-url", label: "Database URL with password", provider: "database", regex: `\\b((?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\\+srv)?|redis|rediss|amqps?):\\/\\/[^\\s:/@"']+:([^\\s@"'/]+)@[^\\s"']+)`, secretGroup: 2, reportGroup: 1, minLength: 6, check: "db-password", keywords: ["://"] }),
+    rule({ id: "tripwire-demo", label: "Tripwire demo secret", provider: "demo", regex: "\\b(tw_fake_[a-z]+_[a-z0-9]{16,})\\b", keywords: ["tw_fake_"] })
+  ]
+};
+
+// server/detect/index.ts
+var shared;
+function defaultEngine() {
+  return shared ??= new Engine([tripwirePack, gitleaks_default]);
+}
+
+// server/real/rules.ts
+var toMatch = (h) => ({ rule: h.rule, value: h.value, variable: h.variable, confidence: h.confidence, via: h.via });
+function matchContent(content, path, startLine = 1) {
+  return defaultEngine().scan(content, path, startLine).map((h) => ({ ...toMatch(h), line: h.line }));
+}
+function mask2(value, rule2) {
+  if (rule2.id.startsWith("private-key")) return "-----BEGIN \u2026 PRIVATE KEY-----";
+  if (rule2.id === "db-url") return value.replace(/:\/\/([^:/@\s]+):[^@\s]+@/, "://$1:\u2022\u2022\u2022\u2022@").slice(0, 48);
+  if (rule2.id === "tripwire-demo") return value.length > 22 ? `${value.slice(0, 22)}\u2026` : value;
   const keep = Math.min(6, Math.floor(value.length / 4));
   return `${value.slice(0, keep)}${"\u2022".repeat(8)} (${value.length} chars)`;
 }
@@ -703,14 +3902,14 @@ function mask2(value, rule) {
 // server/real/scan.ts
 var run = promisify(execFile);
 var SKIP_DIRS = /* @__PURE__ */ new Set([".git", "node_modules", "vendor", "dist", "build", ".next", "out", "coverage", "__pycache__", ".venv", "venv", "target"]);
-var SKIP_FILE = /(?:^|\/)(?:package-lock\.json|yarn\.lock|pnpm-lock\.yaml|composer\.lock|Gemfile\.lock|poetry\.lock|Cargo\.lock|go\.sum)$|\.(?:min\.js|map|png|jpe?g|gif|webp|ico|svg|pdf|zip|gz|woff2?|ttf|eot|mp4|mp3|lock)$/i;
+var SKIP_FILE = /(?:^|\/)(?:\.tripwire-baseline\.json|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|composer\.lock|Gemfile\.lock|poetry\.lock|Cargo\.lock|go\.sum)$|\.(?:min\.js|map|png|jpe?g|gif|webp|ico|svg|pdf|zip|gz|woff2?|ttf|eot|mp4|mp3|lock)$/i;
 var MANIFESTS = /* @__PURE__ */ new Set(["package.json", "Dockerfile", "requirements.txt", "pyproject.toml", "go.mod", "composer.json", "Gemfile", "pom.xml", "build.gradle", "Cargo.toml", "Procfile"]);
 var CI_SERVICE = "CI (GitHub Actions)";
 var HISTORY_COMMITS = Number(process.env.SCAN_HISTORY_COMMITS ?? 300);
 function walk(dir, root = dir, out = []) {
   for (const name of readdirSync(dir)) {
     if (SKIP_DIRS.has(name)) continue;
-    const full = join3(dir, name);
+    const full = join4(dir, name);
     const st = statSync(full, { throwIfNoEntry: false });
     if (!st) continue;
     if (st.isDirectory()) walk(full, root, out);
@@ -719,11 +3918,11 @@ function walk(dir, root = dir, out = []) {
   return out;
 }
 async function listFiles(dir) {
-  if (!existsSync3(join3(dir, ".git"))) return walk(dir);
+  if (!existsSync4(join4(dir, ".git"))) return walk(dir);
   try {
     const { stdout } = await run("git", ["-C", dir, "ls-files", "-z", "-co", "--exclude-standard"], { maxBuffer: 64 * 1024 * 1024 });
     return stdout.split("\0").filter((f) => f && !f.split("/").some((part) => SKIP_DIRS.has(part))).filter((f) => {
-      const st = statSync(join3(dir, f), { throwIfNoEntry: false });
+      const st = statSync(join4(dir, f), { throwIfNoEntry: false });
       return !!st?.isFile() && st.size < 1e6;
     });
   } catch {
@@ -736,12 +3935,12 @@ function githubSlug(target) {
 }
 function normalizeTarget(input2) {
   const t = input2.trim();
-  if (/^[\w.-]+\/[\w.-]+$/.test(t) && !existsSync3(t)) return `https://github.com/${t}.git`;
+  if (/^[\w.-]+\/[\w.-]+$/.test(t) && !existsSync4(t)) return `https://github.com/${t}.git`;
   return t;
 }
 async function cloneRepo(url, depth = HISTORY_COMMITS) {
   if (!/^(https?:\/\/|git@)/.test(url)) throw new Error("Enter a Git URL or owner/name");
-  const tmp = mkdtempSync(join3(tmpdir(), "tripwire-real-"));
+  const tmp = mkdtempSync(join4(tmpdir(), "tripwire-real-"));
   const args = ["clone", "--quiet", "--single-branch", "--no-tags", "--depth", String(Math.max(1, depth)), url, tmp];
   const env = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
   try {
@@ -753,7 +3952,7 @@ async function cloneRepo(url, depth = HISTORY_COMMITS) {
       throw new Error(`Clone failed: ${err.message.split("\n")[0]}`);
     }
     rmSync(tmp, { recursive: true, force: true });
-    const retry = mkdtempSync(join3(tmpdir(), "tripwire-real-"));
+    const retry = mkdtempSync(join4(tmpdir(), "tripwire-real-"));
     const auth = Buffer.from(`x-access-token:${token2}`).toString("base64");
     try {
       await run("git", ["-c", `http.extraHeader=Authorization: Basic ${auth}`, ...args.slice(0, -1), retry], { timeout: 9e4, env });
@@ -784,24 +3983,26 @@ function serviceFor(file, dirs, repoName) {
   return repoName;
 }
 var IGNORE_MARK = /tripwire:ignore|gitleaks:allow/;
-function makeFinding(file, line, text, service) {
-  if (IGNORE_MARK.test(text)) return [];
-  return matchLine(text).map((m) => {
+function findIn(content, file, startLine, service) {
+  const lines = content.split(/\r?\n/);
+  const out = [];
+  for (const m of matchContent(content, file, startLine)) {
+    if (IGNORE_MARK.test(lines[m.line - startLine] ?? "")) continue;
     const provider = m.rule.id === "tripwire-demo" ? m.value.split("_")[2] ?? "demo" : m.rule.provider;
-    return {
+    out.push({
       value: m.value,
-      finding: { id: "", rule: m.rule.id, ruleLabel: m.rule.label, provider, variable: m.variable?.toUpperCase(), file, line, inHead: true, preview: mask2(m.value, m.rule), service, nodeId: "" }
-    };
-  });
+      finding: { id: "", rule: m.rule.id, ruleLabel: m.rule.label, provider, variable: m.variable?.toUpperCase(), file, line: m.line, inHead: true, preview: mask2(m.value, m.rule), service, nodeId: "", confidence: m.confidence, via: m.via }
+    });
+  }
+  return out;
 }
 function scanHead(dir, files, dirs, repoName) {
   const out = [];
   for (const file of files) {
     if (SKIP_FILE.test(file)) continue;
-    const buf = readFileSync3(join3(dir, file));
+    const buf = readFileSync4(join4(dir, file));
     if (buf.includes(0)) continue;
-    const service = serviceFor(file, dirs, repoName);
-    buf.toString("utf8").split(/\r?\n/).forEach((text, i) => out.push(...makeFinding(file, i + 1, text, service)));
+    out.push(...findIn(buf.toString("utf8"), file, 1, serviceFor(file, dirs, repoName)));
   }
   return out;
 }
@@ -809,24 +4010,33 @@ function parsePatch(patch, dirs, repoName, inHead) {
   const raws = [];
   let commit = "";
   let file = "";
-  let line = 0;
   let commits = 0;
+  let hunk = [];
+  let hunkStart = 0;
+  const flush = () => {
+    if (hunk.length && file && !SKIP_FILE.test(file))
+      for (const r of findIn(hunk.join("\n"), file, hunkStart, serviceFor(file, dirs, repoName))) raws.push({ ...r, finding: { ...r.finding, commit: commit || void 0, inHead } });
+    hunk = [];
+  };
   for (const text of patch.split("\n")) {
     if (text.startsWith("__TW__")) {
+      flush();
       commit = text.slice(6);
       commits++;
-    } else if (text.startsWith("+++ ")) file = text.startsWith("+++ b/") ? text.slice(6) : "";
-    else if (text.startsWith("@@")) line = Number(text.match(/\+(\d+)/)?.[1] ?? 0);
-    else if (text.startsWith("+") && file && !SKIP_FILE.test(file)) {
-      for (const r of makeFinding(file, line, text.slice(1), serviceFor(file, dirs, repoName))) raws.push({ ...r, finding: { ...r.finding, commit: commit || void 0, inHead } });
-      line++;
-    }
+    } else if (text.startsWith("+++ ")) {
+      flush();
+      file = text.startsWith("+++ b/") ? text.slice(6) : "";
+    } else if (text.startsWith("@@")) {
+      flush();
+      hunkStart = Number(text.match(/\+(\d+)/)?.[1] ?? 0);
+    } else if (text.startsWith("+") && file) hunk.push(text.slice(1));
   }
+  flush();
   return { raws, commits };
 }
 var GIT_BUF = { maxBuffer: 256 * 1024 * 1024, timeout: 6e4 };
 async function scanHistory(dir, dirs, repoName, limit = HISTORY_COMMITS) {
-  if (limit <= 0 || !existsSync3(join3(dir, ".git"))) return { raws: [], commits: 0 };
+  if (limit <= 0 || !existsSync4(join4(dir, ".git"))) return { raws: [], commits: 0 };
   const { stdout } = await run("git", ["-C", dir, "log", "-p", "-U0", "--no-merges", "--no-color", "--no-ext-diff", "--format=__TW__%h", "-n", String(limit)], GIT_BUF);
   return parsePatch(stdout, dirs, repoName, false);
 }
@@ -863,7 +4073,7 @@ function mergeFindings(head, history, added) {
 function ciSecretRefs(dir, files) {
   const refs = /* @__PURE__ */ new Map();
   for (const file of files.filter((f) => /^\.github\/workflows\/[^/]+\.ya?ml$/.test(f))) {
-    readFileSync3(join3(dir, file), "utf8").split(/\r?\n/).forEach((text, i) => {
+    readFileSync4(join4(dir, file), "utf8").split(/\r?\n/).forEach((text, i) => {
       for (const m of text.matchAll(/secrets\.([A-Za-z_][A-Za-z0-9_]*)/g)) {
         if (m[1] === "GITHUB_TOKEN" || refs.has(m[1])) continue;
         refs.set(m[1], { name: m[1], file, line: i + 1 });
@@ -883,14 +4093,14 @@ function ignoreMatcher(text) {
   return (file) => res.some((re) => re.test(file));
 }
 function loadIgnore(dir) {
-  const p = join3(dir, ".tripwireignore");
-  return ignoreMatcher(existsSync3(p) ? readFileSync3(p, "utf8") : "");
+  const p = join4(dir, ".tripwireignore");
+  return ignoreMatcher(existsSync4(p) ? readFileSync4(p, "utf8") : "");
 }
 function repoNameOf(target, dir) {
-  return githubSlug(target)?.split("/")[1] ?? basename(resolve(dir));
+  return githubSlug(target)?.split("/")[1] ?? basename(resolve2(dir));
 }
 async function currentBranch(dir) {
-  if (!existsSync3(join3(dir, ".git"))) return void 0;
+  if (!existsSync4(join4(dir, ".git"))) return void 0;
   return (await run("git", ["-C", dir, "rev-parse", "--abbrev-ref", "HEAD"])).stdout.trim();
 }
 
@@ -902,11 +4112,11 @@ async function scanTarget(input2, opts = {}, onStage) {
   const remote = isRemote(target);
   const history = opts.history ?? Number(process.env.SCAN_HISTORY_COMMITS ?? 300);
   const warnings = [];
-  let dir = remote ? "" : resolve2(target);
+  let dir = remote ? "" : resolve3(target);
   onStage?.("cloning", {});
   try {
     if (remote) dir = await cloneRepo(target, history);
-    else if (!existsSync4(dir)) throw new Error(`No such directory: ${target}`);
+    else if (!existsSync5(dir)) throw new Error(`No such directory: ${target}`);
     const ignored = loadIgnore(dir);
     const files = (await listFiles(dir)).filter((f) => !ignored(f));
     const dirs = manifestDirs(files);
@@ -925,6 +4135,11 @@ async function scanTarget(input2, opts = {}, onStage) {
       }
     }
     const { findings, samples, values } = mergeFindings(head, past.raws.filter((r) => !ignored(r.finding.file)), added);
+    const accepted = opts.baseline === false ? /* @__PURE__ */ new Set() : loadBaseline(dir);
+    for (const f of findings) {
+      f.fingerprint = fingerprint(f.rule, f.file, values.get(f.id) ?? "");
+      if (accepted.has(f.fingerprint)) f.baselined = true;
+    }
     if (opts.verify) {
       onStage?.("verify", { commitsScanned: past.commits, findings });
       await verifyFindings(findings, values, honeyKeyIds()).catch((err) => warnings.push(`Key verification failed: ${err.message}`));
@@ -939,8 +4154,11 @@ async function scanTarget(input2, opts = {}, onStage) {
   }
 }
 
+// server/detect/schema.ts
+var CONFIDENCE_RANK = { low: 0, medium: 1, high: 2 };
+
 // server/cli/github.ts
-import { appendFileSync, readFileSync as readFileSync4 } from "node:fs";
+import { appendFileSync, readFileSync as readFileSync5 } from "node:fs";
 
 // server/graph.ts
 function blastHops(edges, startIds) {
@@ -968,7 +4186,8 @@ function blastHops(edges, startIds) {
 var MARKER = "<!-- tripwire-report -->";
 var RANK2 = { UNKNOWN: 0, LOW: 1, MODERATE: 2, HIGH: 3, CRITICAL: 4 };
 function evaluate(r, policy) {
-  const active = r.findings.filter((f) => f.verify?.status !== "revoked" && f.verify?.status !== "honey");
+  const floor = CONFIDENCE_RANK[policy.minConfidence ?? "low"];
+  const active = r.findings.filter((f) => f.verify?.status !== "revoked" && f.verify?.status !== "honey" && !f.baselined && CONFIDENCE_RANK[f.confidence ?? "high"] >= floor);
   const candidates = r.diffBase ? active.filter((f) => f.isNew) : active.filter((f) => f.inHead);
   const blocking = policy.secrets ? candidates : [];
   const blockingVulns = policy.vulns === "none" ? [] : r.vulns.filter((v) => RANK2[v.severity] >= RANK2[policy.vulns]);
@@ -985,7 +4204,7 @@ function unlocks(r, f) {
   return blastHops(r.edges, [f.nodeId]).flatMap((h) => h.nodes).map((id) => byId.get(id)).filter((n) => n?.type === "resource").map((n) => n.label);
 }
 var VSTAT = { live: "**LIVE**", revoked: "revoked", honey: "honey", unverified: "unverified" };
-var status = (f) => [f.isNew ? "new" : f.inHead ? "in code" : "history", f.verify ? VSTAT[f.verify.status] : ""].filter(Boolean).join(" \xB7 ");
+var status = (f) => [f.isNew ? "new" : f.inHead ? "in code" : "history", f.baselined ? "baselined" : "", f.confidence && f.confidence !== "high" ? `${f.confidence} confidence` : "", f.verify ? VSTAT[f.verify.status] : ""].filter(Boolean).join(" \xB7 ");
 var reach = (r, f) => f.verify?.access?.length ? f.verify.access.map((a) => a.label) : f.verify?.status === "revoked" || f.verify?.status === "honey" ? [] : unlocks(r, f);
 var order = (f) => f.isNew ? 0 : f.inHead ? 1 : 2;
 var sorted = (fs) => [...fs].sort((a, b) => order(a) - order(b));
@@ -1016,14 +4235,14 @@ function toMarkdown(r, v, maxVulns = 15) {
 function toText(r, v, color, maxVulns = 10) {
   const c = (code) => (s) => color ? `\x1B[${code}m${s}\x1B[0m` : s;
   const [red, yellow, green, dim, bold, cyan] = ["31", "33", "32", "2", "1", "36"].map(c);
-  const tone = (f) => f.isNew ? red("NEW ") : f.inHead ? red("CODE") : yellow("HIST");
+  const tone = (f) => f.baselined ? dim("BASE") : f.isNew ? red("NEW ") : f.inHead ? red("CODE") : yellow("HIST");
   const vtag = (f) => !f.verify ? "" : f.verify.status === "live" ? ` ${red(bold("LIVE"))}` : f.verify.status === "revoked" ? ` ${green("revoked")}` : f.verify.status === "honey" ? ` ${cyan("honey")}` : ` ${dim("unverified")}`;
   const sev = (s) => (RANK2[s] >= 3 ? red : RANK2[s] === 2 ? yellow : dim)(s.padEnd(8));
   const out = ["", `${bold("Tripwire")}  ${r.repo ?? r.name}${r.branch ? dim(` (${r.branch})`) : ""}  ${dim(`${r.filesScanned} files \xB7 ${r.commitsScanned} commits \xB7 ${(r.durationMs / 1e3).toFixed(1)}s`)}`, ""];
   out.push(bold(`Secrets (${r.findings.length})`));
   if (!r.findings.length) out.push(dim("  none found"));
   for (const f of sorted(r.findings)) {
-    out.push(`  ${tone(f)}  ${(f.variable ?? f.ruleLabel).padEnd(22)} ${cyan(`${f.file}:${f.line}`)}${f.inHead ? "" : dim(` @${f.commit}`)}  ${dim(f.ruleLabel)}${vtag(f)}`);
+    out.push(`  ${tone(f)}  ${(f.variable ?? f.ruleLabel).padEnd(22)} ${cyan(`${f.file}:${f.line}`)}${f.inHead ? "" : dim(` @${f.commit}`)}  ${dim(f.ruleLabel)}${f.confidence && f.confidence !== "high" ? dim(` [${f.confidence}]`) : ""}${f.via ? dim(` (${f.via})`) : ""}${vtag(f)}`);
     const u = reach(r, f);
     out.push(dim(`        ${f.preview}${f.verify?.identity ? `  as ${f.verify.identity}` : ""}${u.length ? `  \u2192 unlocks ${u.join(", ")}` : ""}`));
     if (f.verify?.note && f.verify.status !== "live") out.push(dim(`        ${f.verify.note}`));
@@ -1061,7 +4280,7 @@ function pullRequestNumber() {
   const path = process.env.GITHUB_EVENT_PATH;
   if (!path) return void 0;
   try {
-    return JSON.parse(readFileSync4(path, "utf8")).pull_request?.number;
+    return JSON.parse(readFileSync5(path, "utf8")).pull_request?.number;
   } catch {
     return void 0;
   }
@@ -1081,6 +4300,7 @@ async function upsertPrComment(body) {
 // server/cli/main.ts
 var HELP = `Usage: tripwire scan [path | git url | owner/repo] [options]
        tripwire honey create [--email you@x.com] [--plant owner/repo] [--file path]
+       tripwire baseline [path]  accept every current finding in .tripwire-baseline.json
        tripwire honey check      (exit 1 if any decoy was used)
 
 Finds secrets in the code and git history, maps what each one unlocks,
@@ -1092,6 +4312,8 @@ Options:
   --fail-on-vulns <sev>   Also fail on vulnerable deps: low|moderate|high|critical (default: none)
   --no-fail-secrets       Report secrets without failing
   --skip-vulns            Skip the dependency check
+  --min-confidence <c>    Only findings at this confidence or above block: low|medium|high (default: low)
+  --no-baseline           Ignore .tripwire-baseline.json
   --verify                Ask each provider (read-only) if found keys work and what they reach
   --json <file|->         Write the full report as JSON
   --markdown <file>       Write a Markdown report
@@ -1113,6 +4335,8 @@ async function main(argv2, log = (s) => process.stdout.write(s), err = (s) => pr
       "no-fail-secrets": { type: "boolean" },
       "skip-vulns": { type: "boolean" },
       verify: { type: "boolean" },
+      "min-confidence": { type: "string", default: "low" },
+      "no-baseline": { type: "boolean" },
       email: { type: "string" },
       plant: { type: "string" },
       file: { type: "string" },
@@ -1127,6 +4351,9 @@ async function main(argv2, log = (s) => process.stdout.write(s), err = (s) => pr
   const [cmd, target = "."] = positionals;
   if (values.help || !cmd) return log(HELP), 0;
   if (cmd === "honey") return honey(positionals[1], values, log, err);
+  const minConfidence = values["min-confidence"].toLowerCase();
+  if (!(minConfidence in CONFIDENCE_RANK)) return err("--min-confidence must be one of low, medium, high\n"), 2;
+  if (cmd === "baseline") return baseline(target, log, err);
   if (cmd !== "scan") return err(`Unknown command "${cmd}".
 
 ${HELP}`), 2;
@@ -1135,14 +4362,14 @@ ${HELP}`), 2;
 `), 2;
   const history = values.history === void 0 ? void 0 : Number(values.history);
   if (history !== void 0 && !(history >= 0)) return err("--history must be a number >= 0\n"), 2;
-  const report = await scanTarget(target, { history, diff: values.diff, vulns: !values["skip-vulns"], verify: !!values.verify }, (stage) => !values.quiet && err(`tripwire: ${stage}\u2026
+  const report = await scanTarget(target, { history, diff: values.diff, vulns: !values["skip-vulns"], verify: !!values.verify, baseline: !values["no-baseline"] }, (stage) => !values.quiet && err(`tripwire: ${stage}\u2026
 `));
-  const verdict = evaluate(report, { secrets: !values["no-fail-secrets"], vulns: failVulns === "NONE" ? "none" : failVulns });
+  const verdict = evaluate(report, { secrets: !values["no-fail-secrets"], vulns: failVulns === "NONE" ? "none" : failVulns, minConfidence });
   const markdown = toMarkdown(report, verdict);
   if (values.json === "-") log(JSON.stringify(report, null, 2) + "\n");
   else log(toText(report, verdict, !!process.stdout.isTTY && !process.env.NO_COLOR));
-  if (values.json && values.json !== "-") writeFileSync2(values.json, JSON.stringify(report, null, 2));
-  if (values.markdown) writeFileSync2(values.markdown, markdown);
+  if (values.json && values.json !== "-") writeFileSync3(values.json, JSON.stringify(report, null, 2));
+  if (values.markdown) writeFileSync3(values.markdown, markdown);
   if (values.github) for (const line of githubReport(report, verdict, markdown)) log(line + "\n");
   if (values.comment) {
     const note = await upsertPrComment(markdown).catch((e) => `could not comment (${e.message})`);
@@ -1183,12 +4410,22 @@ ${decoyFile(r)}
   return err(`Usage: tripwire honey create|check
 `), 2;
 }
+async function baseline(target, log, err) {
+  if (isRemote(target)) return err("tripwire baseline needs a local checkout.\n"), 2;
+  const report = await scanTarget(target, { vulns: false, baseline: false });
+  const entries = report.findings.flatMap((f) => f.fingerprint ? [{ fingerprint: f.fingerprint, rule: f.rule, file: f.file }] : []);
+  const path = writeBaseline(resolve4(target), entries);
+  log(`Accepted ${entries.length} finding${entries.length === 1 ? "" : "s"} in ${path}.
+Commit ${BASELINE_FILE}; those findings are still listed but no longer fail the check.
+`);
+  return 0;
+}
 
 // server/cli/action.ts
 var input = (name, fallback = "") => (process.env[`INPUT_${name.toUpperCase()}`] ?? "").trim() || fallback;
 function baseSha() {
   try {
-    return JSON.parse(readFileSync5(process.env.GITHUB_EVENT_PATH ?? "", "utf8")).pull_request?.base?.sha;
+    return JSON.parse(readFileSync6(process.env.GITHUB_EVENT_PATH ?? "", "utf8")).pull_request?.base?.sha;
   } catch {
     return void 0;
   }
@@ -1201,6 +4438,8 @@ if (base) argv.push("--diff", base);
 if (base && input("comment", "true") === "true") argv.push("--comment");
 if (input("fail-on-secrets", "true") === "false") argv.push("--no-fail-secrets");
 if (input("verify", "false") === "true") argv.push("--verify");
+if (input("baseline", "true") === "false") argv.push("--no-baseline");
+argv.push("--min-confidence", input("min-confidence", "low"));
 main(argv).then(
   (code) => process.exit(code),
   (e) => {
