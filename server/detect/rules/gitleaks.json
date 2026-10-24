@@ -1518,6 +1518,7 @@
    ],
    "source": "gitleaks",
    "confidence": "high",
+   "multiline": true,
    "path": "(?i)\\.ya?ml$",
    "allowlists": [
     {

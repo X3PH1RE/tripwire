@@ -104,7 +104,7 @@ function confidenceOf(regex: string): Confidence {
 // Ids Tripwire replaces with its own, better-filtered rule.
 const SKIP = new Set(["generic-api-key", "private-key"]);
 // Patterns that deliberately span lines.
-const MULTILINE = new Set(["curl-auth-header", "curl-auth-user"]);
+const MULTILINE = new Set(["curl-auth-header", "curl-auth-user", "kubernetes-secret-yaml"]);
 
 interface TomlAllowlist {
   description?: string;

@@ -1,7 +1,10 @@
 import { allowed, compileAllowlist, compileRegex, entropy, HASHY_NAME, ILLUSTRATIVE_PATH, isPlaceholder, looksBenign, runCheck, type CompiledAllowlist } from "./filters";
+import { KeywordIndex } from "./keywords";
 import type { Confidence, Pack, RuleDef } from "./schema";
 
 export interface CompiledRule {
+  /** Position in the engine's rule list: earlier rules win when two match the same value. */
+  index: number;
   def: RuleDef;
   id: string;
   label: string;
@@ -35,6 +38,13 @@ const STRONG_NAME = /SECRET|PASSWORD|PASSWD|PWD|TOKEN|API_?KEY|PRIVATE|CREDENTIA
 /** Where generic (name-based) matches are noise: lockfiles, vendored code, fixtures and generated output. */
 const GENERIC_SKIP_PATH = /(?:^|\/)(?:__snapshots__|__fixtures__|fixtures?|testdata|test-data|mocks?|node_modules|vendor)\/|\.(?:snap|lock|min\.js|map|svg)$|(?:^|\/)(?:package-lock\.json|yarn\.lock|pnpm-lock\.yaml)$/i;
 
+const NO_RULES: CompiledRule[] = [];
+const NO_HITS: Hit[] = [];
+const MIN_LINE = 8;
+// Cheap yes/no probes so the decoders only allocate on lines that could hold an encoded value.
+const PCT_PROBE = /%[0-9a-f]{2}/i;
+const B64_PROBE = /[A-Za-z0-9+/_-]{24}/;
+const HEX_PROBE = /[0-9a-fA-F]{32}/;
 const MAX_DECODE_DEPTH = 2;
 const MAX_DECODE_TOKENS = 6;
 const B64_TOKEN = /[A-Za-z0-9+/_-]{24,}={0,2}/g;
@@ -55,20 +65,54 @@ function pathLike(v: string): boolean {
   return /^(?:\.{1,2}\/|\/)[\w.-]+/.test(v) || /^[a-z0-9._-]+(?:\/[a-z0-9._-]+){2,}$/.test(v);
 }
 
+const ASCII = /^[\x00-\x7f]+$/;
+
 export class Engine {
   readonly rules: CompiledRule[] = [];
   private global: CompiledAllowlist | undefined;
+  /** Single-pass keyword matcher over every line rule's keywords. */
+  private readonly keywordIndex: KeywordIndex;
+  /** keyword id -> rules that list it. */
+  private readonly keywordRules: CompiledRule[][] = [];
+  /** Line rules with no usable keyword: candidates for every line. */
+  private readonly always: CompiledRule[] = [];
+  /** Rules restricted to certain paths; every other rule applies everywhere. */
+  private readonly pathRules: CompiledRule[] = [];
+  private readonly anywhere: CompiledRule[] = [];
 
   constructor(packs: Pack[]) {
     for (const pack of packs) {
       if (pack.allowlist && !this.global) this.global = compileAllowlist(pack.allowlist);
-      for (const def of pack.rules) this.rules.push(this.compile(def));
+      for (const def of pack.rules) this.rules.push(this.compile(def, this.rules.length));
     }
+    const ids = new Map<string, number>();
+    const keywords: string[] = [];
+    for (const r of this.rules) {
+      if (r.path) this.pathRules.push(r);
+      else this.anywhere.push(r);
+      if (r.def.multiline) continue;
+      if (!r.keywords.length || !r.keywords.every((k) => ASCII.test(k))) {
+        this.always.push(r);
+        continue;
+      }
+      for (const k of r.keywords) {
+        let id = ids.get(k);
+        if (id === undefined) {
+          id = keywords.length;
+          ids.set(k, id);
+          keywords.push(k);
+          this.keywordRules.push([]);
+        }
+        this.keywordRules[id].push(r);
+      }
+    }
+    this.keywordIndex = new KeywordIndex(keywords);
   }
 
-  private compile(def: RuleDef): CompiledRule {
+  private compile(def: RuleDef, index: number): CompiledRule {
     const re = compileRegex(def.regex, "g");
     return {
+      index,
       def,
       id: def.id,
       label: def.label,
@@ -85,16 +129,17 @@ export class Engine {
   scan(content: string, path?: string, startLine = 1): Hit[] {
     if (path && this.global?.paths.some((p) => p.test(path))) return [];
     const lowerAll = content.toLowerCase();
-    const active = this.rules.filter((r) => (!r.path || (!!path && r.path.test(path))) && (!r.keywords.length || r.keywords.some((k) => lowerAll.includes(k))));
+    const matching = path ? this.pathRules.filter((r) => r.path!.test(path)) : [];
+    const forPath = matching.length ? [...this.anywhere, ...matching].sort((x, y) => x.index - y.index) : this.anywhere;
     const out: Hit[] = [];
 
     const lines = content.split(/\r?\n/);
-    const lineRules = active.filter((r) => !r.def.multiline);
     // Decoded text can contain keywords the file as a whole did not, so decoding tests against every rule that applies to this path.
-    const decodeRules = this.rules.filter((r) => !r.def.multiline && (!r.path || (!!path && r.path.test(path))));
-    lines.forEach((text, i) => out.push(...this.scanLine(text, path, startLine + i, lineRules, decodeRules)));
+    const decodeRules = forPath.filter((r) => !r.def.multiline);
+    const perLine = this.candidates(lowerAll, lines.length, matching);
+    for (let i = 0; i < lines.length; i++) out.push(...this.scanLine(lines[i], path, startLine + i, perLine[i] ?? NO_RULES, decodeRules));
 
-    const multi = active.filter((r) => r.def.multiline);
+    const multi = forPath.filter((r) => r.def.multiline && (!r.keywords.length || r.keywords.some((k) => lowerAll.includes(k))));
     if (multi.length) {
       const starts = [0];
       for (let i = 0; i < content.length; i++) if (content.charCodeAt(i) === 10) starts.push(i + 1);
@@ -119,35 +164,77 @@ export class Engine {
     return out.sort((a, b) => a.line - b.line);
   }
 
+  /**
+   * For each line, the line rules whose keywords it contains, in rule order. One Aho-Corasick pass over the file finds
+   * every keyword at once; testing each rule's keywords against each line (or sweeping the file once per keyword) is what
+   * made large repos slow.
+   */
+  private candidates(lowerAll: string, lineCount: number, matching: CompiledRule[]): (CompiledRule[] | undefined)[] {
+    const perLine: (CompiledRule[] | undefined)[] = new Array(lineCount);
+    // A path-restricted rule only runs when this file's path matched it.
+    const eligible = (r: CompiledRule) => !r.path || matching.includes(r);
+    const lastLine = new Int32Array(this.rules.length).fill(-1);
+    this.keywordIndex.scan(lowerAll, (keyword, line) => {
+      if (line >= lineCount) return;
+      for (const r of this.keywordRules[keyword]) {
+        if (lastLine[r.index] === line || !eligible(r)) continue;
+        lastLine[r.index] = line;
+        (perLine[line] ??= []).push(r);
+      }
+    });
+    for (const r of this.always) {
+      if (!eligible(r)) continue;
+      for (let i = 0; i < lineCount; i++) (perLine[i] ??= []).push(r);
+    }
+    // Keywords arrive in file order; rules must run in rule order so the earlier rule wins on identical values.
+    for (const rules of perLine) if (rules && rules.length > 1) rules.sort((x, y) => x.index - y.index);
+    return perLine;
+  }
+
+  /** `via` is set when `text` came out of a decoder; those lines were not pre-filtered by keyword, so they are checked here. */
   private scanLine(text: string, path: string | undefined, line: number, rules: CompiledRule[], decodeRules: CompiledRule[], via?: string): Hit[] {
-    if (text.length > MAX_LINE || !text.trim()) return [];
-    const lower = text.toLowerCase();
-    const variable = text.match(ASSIGN)?.[1];
-    const hits: Hit[] = [];
-    for (const rule of rules) {
-      if (rule.keywords.length && !rule.keywords.some((k) => lower.includes(k))) continue;
-      rule.re.lastIndex = 0;
-      let n = 0;
-      for (const m of text.matchAll(rule.re)) {
-        if (++n > MAX_PER_RULE_PER_LINE) break;
-        const hit = this.accept(rule, m, text, path, line, variable);
-        if (hit) hits.push(hit);
+    // Most lines in a repo have no candidate rule and no long token, so this path must stay allocation-free.
+    if (text.length > MAX_LINE || text.length < MIN_LINE) return NO_HITS;
+    let assign: RegExpMatchArray | null | undefined;
+    const getAssign = () => (assign === undefined ? (assign = text.match(ASSIGN)) : assign);
+    let hits: Hit[] | undefined;
+    if (rules.length) {
+      const lower = via === undefined ? "" : text.toLowerCase();
+      const variable = getAssign()?.[1];
+      for (const rule of rules) {
+        if (via !== undefined && rule.keywords.length && !rule.keywords.some((k) => lower.includes(k))) continue;
+        rule.re.lastIndex = 0;
+        let n = 0;
+        for (const m of text.matchAll(rule.re)) {
+          if (++n > MAX_PER_RULE_PER_LINE) break;
+          const hit = this.accept(rule, m, text, path, line, variable);
+          if (hit) (hits ??= []).push(hit);
+        }
       }
     }
-    if (via === undefined || via.split(">").length < MAX_DECODE_DEPTH) hits.push(...this.decoded(text, path, line, decodeRules, via));
-    const resolved = resolve(hits).map((h) => (via && !h.via ? { ...h, via } : h));
-    if (resolved.length) return resolved;
-    const generic = this.generic(text, path, line);
-    return generic ? [{ ...generic, via }] : [];
+    if (via === undefined || via.split(">").length < MAX_DECODE_DEPTH) {
+      const found = this.decoded(text, path, line, decodeRules, via, getAssign);
+      if (found.length) (hits ??= []).push(...found);
+    }
+    if (hits) {
+      const resolved = resolve(hits);
+      if (resolved.length) return via ? resolved.map((h) => (h.via ? h : { ...h, via })) : resolved;
+    }
+    const generic = this.generic(text, path, line, getAssign());
+    return generic ? [{ ...generic, via }] : NO_HITS;
   }
 
   /** Re-scans base64, URL-encoded and hex values on the line, so a secret hidden in encoding is still found. */
-  private decoded(text: string, path: string | undefined, line: number, rules: CompiledRule[], via: string | undefined): Hit[] {
+  private decoded(text: string, path: string | undefined, line: number, rules: CompiledRule[], via: string | undefined, getAssign: () => RegExpMatchArray | null): Hit[] {
+    const pct = PCT_PROBE.test(text);
+    const b64 = B64_PROBE.test(text);
+    const hex = HEX_PROBE.test(text);
+    if (!pct && !b64 && !hex) return NO_HITS;
     const out: Hit[] = [];
     const next = (kind: string) => (via ? `${via}>${kind}` : kind);
     const rescan = (decodedText: string, kind: string) => out.push(...this.scanLine(decodedText, path, line, rules, rules, next(kind)));
 
-    if (/%[0-9a-f]{2}/i.test(text)) {
+    if (pct) {
       try {
         const url = decodeURIComponent(text);
         if (url !== text) rescan(url, "url");
@@ -155,16 +242,20 @@ export class Engine {
         // malformed escape sequence: nothing to decode
       }
     }
-    const assign = text.match(ASSIGN);
-    for (const m of [...text.matchAll(B64_TOKEN)].slice(0, MAX_DECODE_TOKENS)) {
-      const plain = printable(Buffer.from(m[0], /[-_]/.test(m[0]) ? "base64url" : "base64"));
-      if (!plain) continue;
-      // `password: <base64>` (Kubernetes secrets, CI variables): test the decoded value under the same name.
-      rescan(assign && assign[2] === m[0] ? `${assign[1]}=${plain}` : plain, "base64");
+    if (b64) {
+      const assign = getAssign();
+      for (const m of [...text.matchAll(B64_TOKEN)].slice(0, MAX_DECODE_TOKENS)) {
+        const plain = printable(Buffer.from(m[0], /[-_]/.test(m[0]) ? "base64url" : "base64"));
+        if (!plain) continue;
+        // `password: <base64>` (Kubernetes secrets, CI variables): test the decoded value under the same name.
+        rescan(assign && assign[2] === m[0] ? `${assign[1]}=${plain}` : plain, "base64");
+      }
     }
-    for (const m of [...text.matchAll(HEX_TOKEN)].slice(0, MAX_DECODE_TOKENS)) {
-      const plain = printable(Buffer.from(m[0], "hex"));
-      if (plain) rescan(plain, "hex");
+    if (hex) {
+      for (const m of [...text.matchAll(HEX_TOKEN)].slice(0, MAX_DECODE_TOKENS)) {
+        const plain = printable(Buffer.from(m[0], "hex"));
+        if (plain) rescan(plain, "hex");
+      }
     }
     return out;
   }
@@ -191,10 +282,8 @@ export class Engine {
   }
 
   /** Fallback for `NAME_KEY=<random-looking value>` when no provider rule matched. */
-  private generic(text: string, path: string | undefined, line: number): Hit | undefined {
-    if (path && GENERIC_SKIP_PATH.test(path)) return undefined;
-    const a = text.match(ASSIGN);
-    if (!a) return undefined;
+  private generic(text: string, path: string | undefined, line: number, a: RegExpMatchArray | null): Hit | undefined {
+    if (!a || (path && GENERIC_SKIP_PATH.test(path))) return undefined;
     const value = a[2];
     if (value.length < 16 || value.length > 200) return undefined;
     const strong = STRONG_NAME.test(a[1]) && !HASHY_NAME.test(a[1]);

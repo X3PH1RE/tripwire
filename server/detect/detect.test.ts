@@ -172,3 +172,14 @@ test("found in django: format strings, file names and attribute chains are not s
   assert.equal(strong[0].confidence, "high");
   assert.equal(e.scan(`DATABASE_URL=postgres://app:${rand(20)}@db.internal/app`, "docs/deploy.md")[0].confidence, "low", "same URL inside docs");
 });
+
+test("path-restricted rules only run on matching files", () => {
+  const e = defaultEngine();
+  const tf = 'administrator_login_password = "p4ssw0rdx7q2m9zk"';
+  assert.ok(e.scan(tf, "infra/main.tf").some((h) => h.rule.id === "hashicorp-tf-password"));
+  assert.ok(!e.scan(tf, "src/app.py").some((h) => h.rule.id === "hashicorp-tf-password"), "wrong file type");
+  assert.ok(!e.scan(tf).some((h) => h.rule.id === "hashicorp-tf-password"), "no path at all");
+  // The Kubernetes Secret rule spans lines, so it runs over whole files.
+  const k8s = ["apiVersion: v1", "kind: Secret", "metadata:", "  name: db", "data:", "  password: " + Buffer.from(rand(24)).toString("base64")].join("\n");
+  assert.ok(e.scan(k8s, "k8s/secret.yaml").length >= 1);
+});
