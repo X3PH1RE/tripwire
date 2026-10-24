@@ -3,7 +3,7 @@ import { motion } from "framer-motion";
 import type { GraphNode } from "../../../shared/types";
 import { dangerColor, statusClasses } from "../colors";
 
-export type TripNodeData = { node: GraphNode; lit: boolean; selected: boolean };
+export type TripNodeData = { node: GraphNode; lit: boolean; selected: boolean; secured: boolean };
 export type TripFlowNode = Node<TripNodeData, "trip">;
 
 const ICON_PATH: Record<GraphNode["type"], string> = {
@@ -35,11 +35,11 @@ function subtitle(n: GraphNode): string {
 const hidden = { opacity: 0, width: 6, height: 6 };
 
 export function TripNode({ data }: NodeProps<TripFlowNode>) {
-  const { node: n, lit, selected } = data;
+  const { node: n, lit, selected, secured } = data;
   const clickable = n.type === "secret";
   return (
     <div
-      className={`tw-node relative w-[230px] rounded-xl border-2 px-3 py-2 ${statusClasses(n)} ${
+      className={`tw-node relative w-[230px] rounded-xl border-2 px-3 py-2 ${statusClasses(n, secured)} ${
         lit ? "ring-4 ring-orange-400/80" : ""
       } ${selected ? "outline outline-2 outline-offset-4 outline-sky-400" : ""} ${clickable ? "cursor-pointer" : ""}`}
     >

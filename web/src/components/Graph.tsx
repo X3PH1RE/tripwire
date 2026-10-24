@@ -29,11 +29,11 @@ export function Graph({ demo, litEdges, litNodes, selectedId, onSelect }: Props)
         id: n.id,
         type: "trip",
         position: n.position,
-        data: { node: n, lit: litNodes.has(n.id), selected: n.id === selectedId },
+        data: { node: n, lit: litNodes.has(n.id), selected: n.id === selectedId, secured: demo.containment.status === "done" },
         draggable: false,
         selectable: false,
       })),
-    [demo.nodes, litNodes, selectedId],
+    [demo.nodes, demo.containment.status, litNodes, selectedId],
   );
 
   const edges: Edge[] = useMemo(() => {

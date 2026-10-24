@@ -1,27 +1,60 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { post } from "./api";
+import { AlertFeed } from "./components/AlertFeed";
 import { BlastPanel } from "./components/BlastPanel";
+import { ContainPanel } from "./components/ContainPanel";
+import { ControlBar } from "./components/ControlBar";
 import { Graph } from "./components/Graph";
+import { Timeline } from "./components/Timeline";
 import { useStore } from "./state/store";
+
+const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function until(check: () => boolean, timeoutMs = 30_000) {
+  const start = Date.now();
+  while (!check() && Date.now() - start < timeoutMs) await wait(200);
+}
 
 export default function App() {
   const { demo, connected, connect, selectedId, blast, litEdges, litNodes, showBlast, clearBlast } = useStore();
+  const [running, setRunning] = useState(false);
 
   useEffect(() => connect(), [connect]);
+
+  const reset = async () => {
+    clearBlast();
+    await post("/reset");
+  };
+
+  const runDemo = async () => {
+    setRunning(true);
+    try {
+      await reset();
+      await wait(1500);
+      await post("/breach", { provider: "railway" });
+      await wait(4500);
+      await showBlast("sec-database-url");
+      await wait(4500);
+      clearBlast();
+      await post("/honey/plant");
+      await wait(1500);
+      await post("/honey/attack");
+      await wait(4000);
+      await post("/contain");
+      await until(() => useStore.getState().demo?.containment.status === "done");
+      await wait(2500);
+      await post("/cve");
+      await until(() => useStore.getState().demo?.cve.status === "done");
+    } finally {
+      setRunning(false);
+    }
+  };
 
   if (!demo) return <div className="p-10 text-2xl text-slate-400">Connecting to Tripwire…</div>;
 
   return (
     <div className="flex h-full flex-col">
-      <header className="flex items-center gap-4 border-b border-slate-800 px-6 py-3">
-        <h1 className="text-3xl font-black tracking-tight text-slate-50">
-          Trip<span className="text-red-500">wire</span>
-        </h1>
-        <span className={`h-3 w-3 rounded-full ${connected ? "bg-emerald-400" : "bg-red-500"}`} />
-        <button className="ml-auto rounded-lg bg-slate-800 px-4 py-2 text-lg hover:bg-slate-700" onClick={() => post("/reset")}>
-          Reset
-        </button>
-      </header>
+      <ControlBar demo={demo} connected={connected} onReset={reset} onRunDemo={runDemo} running={running} />
       <main className="flex min-h-0 flex-1">
         <div className="min-w-0 flex-1">
           <Graph
@@ -34,6 +67,9 @@ export default function App() {
         </div>
         <aside className="flex w-[440px] shrink-0 flex-col gap-3 overflow-y-auto border-l border-slate-800 p-4">
           {blast && <BlastPanel blast={blast} demo={demo} onClose={clearBlast} />}
+          <Timeline cve={demo.cve} />
+          <ContainPanel demo={demo} />
+          <AlertFeed incidents={demo.incidents} />
         </aside>
       </main>
     </div>

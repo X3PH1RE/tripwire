@@ -3,13 +3,17 @@ import express from "express";
 import { resolve } from "node:path";
 import { ROOT } from "./paths";
 import type { BlastResult } from "../shared/types";
+import { cleanupInBackground, simulateCve } from "./cve";
 import { blastHops } from "./graph";
+import { PROVIDERS, plantTripwires, simulateAttacker, simulateBreach } from "./incidents";
 import { cannedBlast, generate } from "./llm";
+import { contain } from "./rotation";
 import { scanTarget } from "./scanner";
 import { resetState, snapshot, state, subscribe, world } from "./state";
 
 config({ path: resolve(ROOT, ".env.local"), quiet: true });
 resetState();
+cleanupInBackground();
 
 const app = express();
 app.use(express.json());
@@ -24,6 +28,38 @@ app.get("/api/events", (_req, res) => {
 
 app.post("/api/reset", (_req, res) => {
   resetState();
+  cleanupInBackground();
+  res.json({ ok: true });
+});
+
+app.post("/api/honey/plant", (_req, res) => {
+  plantTripwires();
+  res.json({ ok: true });
+});
+
+app.post("/api/honey/attack", (_req, res) => {
+  simulateAttacker();
+  res.json({ ok: true });
+});
+
+app.get("/api/providers", (_req, res) => {
+  res.json(PROVIDERS);
+});
+
+app.post("/api/breach", (req, res) => {
+  const provider = String(req.body?.provider ?? "railway");
+  if (!PROVIDERS.includes(provider)) return void res.status(400).json({ error: "unknown provider" });
+  simulateBreach(provider);
+  res.json({ ok: true });
+});
+
+app.post("/api/contain", (_req, res) => {
+  contain();
+  res.json({ ok: true });
+});
+
+app.post("/api/cve", (_req, res) => {
+  simulateCve();
   res.json({ ok: true });
 });
 
