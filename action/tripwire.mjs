@@ -4036,8 +4036,13 @@ function parsePatch(patch, dirs, repoName, inHead) {
 var GIT_BUF = { maxBuffer: 256 * 1024 * 1024, timeout: 6e4 };
 async function scanHistory(dir, dirs, repoName, limit = HISTORY_COMMITS) {
   if (limit <= 0 || !existsSync4(join4(dir, ".git"))) return { raws: [], commits: 0 };
-  const { stdout } = await run("git", ["-C", dir, "log", "-p", "-U0", "--no-merges", "--no-color", "--no-ext-diff", "--format=__TW__%h", "-n", String(limit)], GIT_BUF);
-  return parsePatch(stdout, dirs, repoName, false);
+  try {
+    const { stdout } = await run("git", ["-C", dir, "log", "-p", "-U0", "--no-merges", "--no-color", "--no-ext-diff", "--format=__TW__%h", "-n", String(limit)], GIT_BUF);
+    return parsePatch(stdout, dirs, repoName, false);
+  } catch (err) {
+    if (/does not have any commits yet|bad default revision|unknown revision/i.test(String(err.stderr ?? err))) return { raws: [], commits: 0 };
+    throw err;
+  }
 }
 async function scanDiff(dir, dirs, repoName, base) {
   const diff = () => run("git", ["-C", dir, "diff", "-U0", "--no-color", "--no-ext-diff", base, "HEAD"], GIT_BUF);
@@ -4506,10 +4511,11 @@ function toText(r, v, color, maxVulns = 10) {
     out.push(dim(`        ${f.preview}${f.verify?.identity ? `  as ${f.verify.identity}` : ""}${u.length ? `  \u2192 unlocks ${u.join(", ")}` : ""}`));
     if (f.verify?.note && f.verify.status !== "live") out.push(dim(`        ${f.verify.note}`));
   }
-  out.push("", bold(`Vulnerable dependencies (${r.vulns.length})`));
-  if (!r.vulns.length) out.push(dim("  none found"));
-  for (const x of r.vulns.slice(0, maxVulns)) out.push(`  ${sev(x.severity)} ${`${x.name}@${x.version}`.padEnd(30)} ${x.fixed ? green(`\u2192 ${x.fixed}`.padEnd(14)) : dim("no fix".padEnd(14))} ${dim(`${x.file}  ${x.advisories[0].id}`)}`);
-  if (r.vulns.length > maxVulns) out.push(dim(`  \u2026and ${r.vulns.length - maxVulns} more (use --json for the full list)`));
+  const showVulns = r.diffBase !== "staged";
+  if (showVulns) out.push("", bold(`Vulnerable dependencies (${r.vulns.length})`));
+  if (showVulns && !r.vulns.length) out.push(dim("  none found"));
+  for (const x of showVulns ? r.vulns.slice(0, maxVulns) : []) out.push(`  ${sev(x.severity)} ${`${x.name}@${x.version}`.padEnd(30)} ${x.fixed ? green(`\u2192 ${x.fixed}`.padEnd(14)) : dim("no fix".padEnd(14))} ${dim(`${x.file}  ${x.advisories[0].id}`)}`);
+  if (showVulns && r.vulns.length > maxVulns) out.push(dim(`  \u2026and ${r.vulns.length - maxVulns} more (use --json for the full list)`));
   for (const w of r.warnings) out.push("", yellow(`warning: ${w}`));
   out.push("", v.failed ? `${red(bold("FAIL"))}  ${v.reasons.join(", ")}` : `${green(bold("PASS"))}  no blocking findings`, "");
   return out.join("\n");

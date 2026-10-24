@@ -274,3 +274,17 @@ test("install-hook writes a pre-commit hook, refuses to clobber someone else's, 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("a repository with no commits yet scans its files instead of failing", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tw-empty-"));
+  try {
+    execFileSync("git", ["-C", dir, "init", "-q", "-b", "main"], { stdio: "ignore" });
+    writeFileSync(join(dir, ".env"), `STRIPE_KEY=${STRIPE}\n`);
+    const r = await scanTarget(dir, { vulns: false });
+    assert.equal(r.commitsScanned, 0);
+    assert.equal(r.findings.length, 1);
+    assert.equal(await main(["scan", dir, "--skip-vulns", "-q"], () => undefined, () => undefined), 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

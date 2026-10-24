@@ -171,8 +171,14 @@ const GIT_BUF = { maxBuffer: 256 * 1024 * 1024, timeout: 60_000 };
 /** Scans lines added in recent commits so secrets that were deleted (but never rotated) still show up. */
 export async function scanHistory(dir: string, dirs: Set<string>, repoName: string, limit = HISTORY_COMMITS): Promise<{ raws: Raw[]; commits: number }> {
   if (limit <= 0 || !existsSync(join(dir, ".git"))) return { raws: [], commits: 0 };
-  const { stdout } = await run("git", ["-C", dir, "log", "-p", "-U0", "--no-merges", "--no-color", "--no-ext-diff", "--format=__TW__%h", "-n", String(limit)], GIT_BUF);
-  return parsePatch(stdout, dirs, repoName, false);
+  try {
+    const { stdout } = await run("git", ["-C", dir, "log", "-p", "-U0", "--no-merges", "--no-color", "--no-ext-diff", "--format=__TW__%h", "-n", String(limit)], GIT_BUF);
+    return parsePatch(stdout, dirs, repoName, false);
+  } catch (err) {
+    // A freshly `git init`ed repo has no commits, hence no history; that is not an error.
+    if (/does not have any commits yet|bad default revision|unknown revision/i.test(String((err as { stderr?: string }).stderr ?? err))) return { raws: [], commits: 0 };
+    throw err;
+  }
 }
 
 /** Lines added between `base` and HEAD, i.e. what a pull request introduces. Fetches `base` if a shallow checkout lacks it. */

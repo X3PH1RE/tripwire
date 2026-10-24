@@ -1,6 +1,42 @@
 {
-  "name": "tripwire",
-  "private": true,
+  "name": "tripwire-scan",
+  "version": "1.0.0",
+  "description": "Finds leaked secrets in code, git history and commits, maps what each unlocks, checks which are live, and revokes them. CLI, pre-commit hook and GitHub Action.",
+  "license": "MIT",
+  "author": "Ashwin Menon",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/X3PH1RE/tripwire.git"
+  },
+  "homepage": "https://github.com/X3PH1RE/tripwire#readme",
+  "bugs": {
+    "url": "https://github.com/X3PH1RE/tripwire/issues"
+  },
+  "keywords": [
+    "secrets",
+    "secret-scanning",
+    "security",
+    "gitleaks",
+    "pre-commit",
+    "github-action",
+    "credentials",
+    "devsecops",
+    "osv"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "tripwire": "action/tripwire.mjs"
+  },
+  "files": [
+    "action/tripwire.mjs",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "workspaces": [
     "server",
     "web"
@@ -14,15 +50,13 @@
     "build:cli": "node scripts/build-cli.mjs",
     "import:gitleaks": "tsx scripts/import-gitleaks.mts",
     "bench": "tsx bench/run.mts",
-    "bench:fetch": "tsx bench/fetch-gitleaks.mts"
+    "bench:fetch": "tsx bench/fetch-gitleaks.mts",
+    "prepack": "npm run build:cli"
   },
   "devDependencies": {
     "concurrently": "^9.2.5",
     "esbuild": "^0.28.2",
     "smol-toml": "^1.9.1",
     "tsx": "^4.23.15"
-  },
-  "bin": {
-    "tripwire": "action/tripwire.mjs"
   }
 }

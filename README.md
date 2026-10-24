@@ -54,6 +54,26 @@ Exits `1` when something blocks, `0` when clean, `2` on usage errors. `tripwire 
 
 False positives: add `tripwire:ignore` (or `gitleaks:allow`) on the line, or globs to `.tripwireignore` (`fixtures/`, `*.test.ts`, `docs/**/*.md`).
 
+### Pre-commit hook
+
+Catch a secret before it is ever committed:
+
+```bash
+npx github:X3PH1RE/tripwire install-hook     # writes .git/hooks/pre-commit (respects core.hooksPath)
+```
+
+The hook runs `tripwire scan --staged`: only lines you have `git add`ed, no history and no dependency lookup, so it takes a fraction of a second. A commit that adds a secret is refused; `.tripwireignore`, `tripwire:ignore` comments and the baseline all apply. Bypass once with `git commit --no-verify` or `TRIPWIRE_SKIP=1 git commit`. `install-hook` never overwrites a hook it did not write (`--force` to replace, `--remove` to uninstall). If `tripwire` is not on your PATH, the hook fetches it with `npx`.
+
+Using the [pre-commit](https://pre-commit.com) framework instead? Add this to `.pre-commit-config.yaml`:
+
+```yaml
+repos:
+  - repo: https://github.com/X3PH1RE/tripwire
+    rev: v1.0.0
+    hooks:
+      - id: tripwire
+```
+
 ### Live keys and real reach (`--verify`)
 
 With `--verify` (CLI), `verify: true` (Action) or **Check if keys are live** (UI), Tripwire makes one read-only "who am I" call per key to its own provider: AWS STS + IAM, GitHub, Stripe, Slack, OpenAI, Anthropic, SendGrid and npm. Each secret is marked `live`, `revoked` or `unverified`. For live keys the graph shows what the provider says the key reaches (AWS account and IAM policies, GitHub repos it can write to, Stripe account, Slack workspace and scopes) instead of a guess from the variable name. Revoked keys and Tripwire's own decoys stop failing the check. Off by default because it uses the found key.
@@ -111,7 +131,7 @@ A honey secret is a real AWS key from [Canarytokens](https://canarytokens.org) w
 
 ### GitHub Action
 
-Copy [examples/tripwire.yml](examples/tripwire.yml) to `.github/workflows/tripwire.yml`. On pull requests it fails only when the PR adds a secret, annotates the offending lines, and keeps one summary comment up to date with the secrets, what each unlocks, and vulnerable dependencies. On pushes it fails while any secret is in the code. Inputs: `path`, `fail-on-secrets`, `fail-on-vulns`, `comment`, `history`, `verify`, `min-confidence`, `baseline`, `token`. Outputs: `secrets`, `new-secrets`, `vulns`, `failed`.
+Copy [examples/tripwire.yml](examples/tripwire.yml) to `.github/workflows/tripwire.yml` (it uses `X3PH1RE/tripwire@v1`; pin a full commit SHA if you want to review exactly what runs). On pull requests it fails only when the PR adds a secret, annotates the offending lines, and keeps one summary comment up to date with the secrets, what each unlocks, and vulnerable dependencies. On pushes it fails while any secret is in the code. Inputs: `path`, `fail-on-secrets`, `fail-on-vulns`, `comment`, `history`, `verify`, `min-confidence`, `baseline`, `token`. Outputs: `secrets`, `new-secrets`, `vulns`, `failed`.
 
 The action runs `action/action.mjs`, a self-contained bundle (no install step). Rebuild it with `npm run build:cli` after changing `server/real` or `server/cli`.
 
