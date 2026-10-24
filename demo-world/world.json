@@ -129,7 +129,7 @@
       "label": "DEPLOY_TOKEN",
       "provider": "github",
       "file": ".github/workflows/deploy.yml",
-      "line": 11,
+      "line": 10,
       "status": "ok",
       "position": {
         "x": 520,

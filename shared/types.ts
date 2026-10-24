@@ -39,3 +39,16 @@ export interface World {
   nodes: GraphNode[];
   edges: GraphEdge[];
 }
+
+export interface ScanHit {
+  file: string;
+  line: number;
+  variable?: string;
+  rule: "prefix" | "assignment" | "entropy";
+  preview: string;
+  entropy: number;
+  kind: "secret" | "decoy" | "unknown";
+  nodeId?: string;
+  provider?: string;
+  reaches: { id: string; label: string; sensitivity?: GraphNode["sensitivity"] }[];
+}
