@@ -82,6 +82,7 @@ export function simulateCve(): void {
     if (!alive()) return;
     step("ready").at = Date.now();
     svc.status = "patched";
+    svc.version = `php ${from} → ${CVE.fixed}`;
     svc.badge = state.cve.prNumber ? `PR #${state.cve.prNumber}` : "patch ready";
     state.cve.status = "done";
     addIncident({

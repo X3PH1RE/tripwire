@@ -29,7 +29,7 @@ export function ControlBar({ demo, connected, onReset, onRunDemo, running }: { d
   const containTime = c.startedAt ? (c.finishedAt ?? now) - c.startedAt : null;
 
   return (
-    <header className="flex flex-wrap items-center gap-3 border-b border-slate-800 px-5 py-3">
+    <header className="flex flex-wrap items-center gap-2.5 border-b border-slate-800 px-5 py-3">
       <h1 className="mr-2 text-3xl font-black tracking-tight text-slate-50">
         Trip<span className="text-red-500">wire</span>
       </h1>
