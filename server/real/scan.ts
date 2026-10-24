@@ -55,32 +55,58 @@ export function normalizeTarget(input: string): string {
   return t;
 }
 
-/** Clones a repo into a temp dir (falling back to GITHUB_TOKEN for private GitHub repos). */
+/** A token for private GitHub repos: GITHUB_TOKEN, else whatever the GitHub CLI is logged in with. */
+async function githubToken(): Promise<string | undefined> {
+  if (process.env.GITHUB_TOKEN) return process.env.GITHUB_TOKEN;
+  try {
+    return (await run("gh", ["auth", "token"], { timeout: 5_000 })).stdout.trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The last meaningful line git printed, so the UI says why a clone failed instead of repeating the command. */
+function gitReason(err: unknown): string {
+  const e = err as { stderr?: string; killed?: boolean; signal?: string; message?: string };
+  if (e.killed || e.signal === "SIGTERM") return "timed out";
+  const lines = String(e.stderr ?? e.message ?? "").split("\n").map((l) => l.trim()).filter(Boolean);
+  return (lines.reverse().find((l) => !/^(hint|error: )/i.test(l)) ?? lines[0] ?? "unknown error").replace(/^fatal:\s*/i, "");
+}
+
+/** Clones a repo into a temp dir. Private GitHub repos are retried with GITHUB_TOKEN or the `gh` login. */
 export async function cloneRepo(url: string, depth = HISTORY_COMMITS): Promise<string> {
   if (!/^(https?:\/\/|git@)/.test(url)) throw new Error("Enter a Git URL or owner/name");
-  const tmp = mkdtempSync(join(tmpdir(), "tripwire-real-"));
-  const args = ["clone", "--quiet", "--single-branch", "--no-tags", "--depth", String(Math.max(1, depth)), url, tmp];
-  const env = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
-  try {
-    await run("git", args, { timeout: 90_000, env });
-  } catch (err) {
-    const token = process.env.GITHUB_TOKEN;
-    if (!token || !url.includes("github.com")) {
-      rmSync(tmp, { recursive: true, force: true });
-      throw new Error(`Clone failed: ${(err as Error).message.split("\n")[0]}`);
+  const args = ["clone", "--quiet", "--single-branch", "--no-tags", "--depth", String(Math.max(1, depth)), url];
+  // Never wait on a credential prompt (terminal or Git Credential Manager window): fail fast, then try a token.
+  const env = { ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never", GIT_ASKPASS: "echo" };
+  // Big repositories on a slow connection legitimately take minutes; only a stalled clone should be given up on.
+  const timeout = Number(process.env.CLONE_TIMEOUT_MS ?? 600_000);
+  const attempt = async (extra: string[]) => {
+    const dest = mkdtempSync(join(tmpdir(), "tripwire-real-"));
+    try {
+      await run("git", [...extra, ...args, dest], { timeout, env, maxBuffer: 16 * 1024 * 1024 });
+      return dest;
+    } catch (err) {
+      rmSync(dest, { recursive: true, force: true });
+      throw err;
     }
-    rmSync(tmp, { recursive: true, force: true });
-    const retry = mkdtempSync(join(tmpdir(), "tripwire-real-"));
+  };
+  try {
+    return await attempt([]);
+  } catch (first) {
+    // A timeout is slowness, not missing credentials: a second download with a token would only take as long again.
+    if (gitReason(first) === "timed out") throw new Error(`Clone failed: timed out after ${Math.round(timeout / 1000)}s. The repository is large or the connection is slow; raise CLONE_TIMEOUT_MS.`);
+    if (!url.includes("github.com")) throw new Error(`Clone failed: ${gitReason(first)}`);
+    const token = await githubToken();
+    if (!token) throw new Error(`Clone failed: ${gitReason(first)}. If the repository is private, set GITHUB_TOKEN or run \`gh auth login\` and scan again.`);
     const auth = Buffer.from(`x-access-token:${token}`).toString("base64");
     try {
-      await run("git", ["-c", `http.extraHeader=Authorization: Basic ${auth}`, ...args.slice(0, -1), retry], { timeout: 90_000, env });
-    } catch {
-      rmSync(retry, { recursive: true, force: true });
-      throw new Error("Clone failed: repository not found or not accessible with this token");
+      return await attempt(["-c", `http.extraHeader=Authorization: Basic ${auth}`]);
+    } catch (second) {
+      if (gitReason(second) === "timed out") throw new Error(`Clone failed: timed out after ${Math.round(timeout / 1000)}s. The repository is large or the connection is slow; raise CLONE_TIMEOUT_MS.`);
+      throw new Error(`Clone failed: ${gitReason(second)}. The repository was not found, or this token cannot read it.`);
     }
-    return retry;
   }
-  return tmp;
 }
 
 export function manifestDirs(files: string[]): Set<string> {
