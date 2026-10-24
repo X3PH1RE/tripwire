@@ -1,0 +1,19 @@
+# Copy to .github/workflows/tripwire.yml in your repo.
+name: Tripwire
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+  pull-requests: write # PR summary comment
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # scan full git history for deleted-but-live secrets
+      - uses: X3PH1RE/tripwire@main
+        with:
+          fail-on-vulns: none # or low | moderate | high | critical

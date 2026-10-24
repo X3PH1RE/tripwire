@@ -1,0 +1,37 @@
+name: Tripwire secret & dependency scan
+description: Finds leaked secrets in code and git history, maps what each one unlocks, and flags vulnerable dependencies (OSV.dev).
+author: X3PH1RE
+branding:
+  icon: shield
+  color: red
+inputs:
+  path:
+    description: Directory to scan.
+    default: "."
+  fail-on-secrets:
+    description: Fail when secrets are found (on pull requests, only secrets the PR adds).
+    default: "true"
+  fail-on-vulns:
+    description: Also fail on vulnerable dependencies at this severity or above (low, moderate, high, critical, none).
+    default: "none"
+  comment:
+    description: Post or update a summary comment on pull requests (needs pull-requests write).
+    default: "true"
+  history:
+    description: Commits of git history to scan. Use actions/checkout with fetch-depth 0 to scan beyond the checkout depth.
+    default: "300"
+  token:
+    description: Token used to comment on pull requests.
+    default: ${{ github.token }}
+outputs:
+  secrets:
+    description: Number of secrets found.
+  new-secrets:
+    description: Number of secrets added by the pull request.
+  vulns:
+    description: Number of vulnerable packages.
+  failed:
+    description: Whether the check failed.
+runs:
+  using: node24
+  main: action/action.mjs

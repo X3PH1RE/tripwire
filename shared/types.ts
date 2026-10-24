@@ -117,6 +117,8 @@ export interface Finding {
   /** Short SHA of the commit that introduced it when it only survives in git history. */
   commit?: string;
   inHead: boolean;
+  /** Added by the change being checked (`--diff <base>`). */
+  isNew?: boolean;
   preview: string;
   service: string;
   nodeId: string;

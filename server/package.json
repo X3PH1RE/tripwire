@@ -6,7 +6,7 @@
     "dev": "tsx watch --clear-screen=false index.ts",
     "start": "tsx index.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test real/*.test.ts"
+    "test": "tsx --test real/*.test.ts cli/*.test.ts"
   },
   "dependencies": {
     "dotenv": "^18.0.9",

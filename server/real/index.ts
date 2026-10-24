@@ -1,13 +1,11 @@
-import { existsSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 import type { RealScan } from "../../shared/types";
 import { ROOT } from "../paths";
 import { broadcast, state } from "../state";
 import { emptyScan } from "./empty";
 import { openFixPr } from "./fix";
-import { buildGraph } from "./graph";
-import { findVulns, parseDeps } from "./osv";
-import { ciSecretRefs, cloneRepo, currentBranch, githubSlug, manifestDirs, mergeFindings, normalizeTarget, repoNameOf, scanHead, scanHistory, walk } from "./scan";
+import { isRemote, scanTarget } from "./core";
+import { githubSlug, normalizeTarget } from "./scan";
 
 let scanGen = 0;
 
@@ -19,42 +17,18 @@ export function clearScan(): void {
 
 export function startScan(input: string): void {
   const gen = ++scanGen;
-  const target = normalizeTarget(input);
-  state.scan = { ...emptyScan(), status: "cloning", target, repo: githubSlug(target), startedAt: Date.now() };
+  const normalized = normalizeTarget(input);
+  const target = isRemote(normalized) ? normalized : resolve(ROOT, normalized);
+  state.scan = { ...emptyScan(), status: "cloning", target: normalized, repo: githubSlug(normalized), startedAt: Date.now() };
   broadcast();
-  const live = () => gen === scanGen;
   const update = (patch: Partial<RealScan>) => {
-    if (!live()) return;
+    if (gen !== scanGen) return;
     Object.assign(state.scan, patch);
     broadcast();
   };
-
-  (async () => {
-    const remote = /^(https?:\/\/|git@)/.test(target);
-    let dir = remote ? "" : resolve(ROOT, target);
-    try {
-      if (remote) dir = await cloneRepo(target);
-      else if (!existsSync(dir)) throw new Error(`No such directory: ${target}`);
-      if (!live()) return;
-      const files = walk(dir);
-      const dirs = manifestDirs(files);
-      const name = repoNameOf(target, dir);
-      update({ status: "secrets", branch: await currentBranch(dir), filesScanned: files.length });
-      const head = scanHead(dir, files, dirs, name);
-      update({ status: "history" });
-      const history = await scanHistory(dir, dirs, name);
-      const { findings, samples } = mergeFindings(head, history.raws);
-      const graph = buildGraph(name, findings, ciSecretRefs(dir, files), samples);
-      update({ status: "vulns", commitsScanned: history.commits, findings, ...graph });
-      let vulnError: string | undefined;
-      const vulns = await findVulns(parseDeps(dir, files)).catch((err: Error) => ((vulnError = `Vulnerability lookup failed: ${err.message}`), []));
-      update({ status: "done", vulns, error: vulnError, finishedAt: Date.now() });
-    } catch (err) {
-      update({ status: "failed", error: (err as Error).message, finishedAt: Date.now() });
-    } finally {
-      if (remote && dir) rmSync(dir, { recursive: true, force: true });
-    }
-  })();
+  scanTarget(target, {}, (status, partial) => update({ status, ...partial }))
+    .then((r) => update({ status: "done", vulns: r.vulns, error: r.warnings[0], finishedAt: Date.now() }))
+    .catch((err: Error) => update({ status: "failed", error: err.message, finishedAt: Date.now() }));
 }
 
 export function startFix(keys?: string[]): void {

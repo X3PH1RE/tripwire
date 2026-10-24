@@ -27,6 +27,23 @@ export function walk(dir: string, root = dir, out: string[] = []): string[] {
   return out;
 }
 
+/** Files git would track (tracked + untracked, minus .gitignore), falling back to a plain walk outside git. */
+export async function listFiles(dir: string): Promise<string[]> {
+  if (!existsSync(join(dir, ".git"))) return walk(dir);
+  try {
+    const { stdout } = await run("git", ["-C", dir, "ls-files", "-z", "-co", "--exclude-standard"], { maxBuffer: 64 * 1024 * 1024 });
+    return stdout
+      .split("\0")
+      .filter((f) => f && !f.split("/").some((part) => SKIP_DIRS.has(part)))
+      .filter((f) => {
+        const st = statSync(join(dir, f), { throwIfNoEntry: false });
+        return !!st?.isFile() && st.size < 1_000_000;
+      });
+  } catch {
+    return walk(dir);
+  }
+}
+
 export function githubSlug(target: string): string | undefined {
   const m = target.match(/github\.com[/:]([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/);
   return m ? `${m[1]}/${m[2]}` : undefined;
@@ -39,10 +56,10 @@ export function normalizeTarget(input: string): string {
 }
 
 /** Clones a repo into a temp dir (falling back to GITHUB_TOKEN for private GitHub repos). */
-export async function cloneRepo(url: string): Promise<string> {
+export async function cloneRepo(url: string, depth = HISTORY_COMMITS): Promise<string> {
   if (!/^(https?:\/\/|git@)/.test(url)) throw new Error("Enter a Git URL or owner/name");
   const tmp = mkdtempSync(join(tmpdir(), "tripwire-real-"));
-  const args = ["clone", "--quiet", "--single-branch", "--no-tags", "--depth", String(HISTORY_COMMITS), url, tmp];
+  const args = ["clone", "--quiet", "--single-branch", "--no-tags", "--depth", String(Math.max(1, depth)), url, tmp];
   const env = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
   try {
     await run("git", args, { timeout: 90_000, env });
@@ -86,12 +103,15 @@ export function serviceFor(file: string, dirs: Set<string>, repoName: string): s
   return repoName;
 }
 
-interface Raw {
+export interface Raw {
   finding: Finding;
   value: string;
 }
 
+const IGNORE_MARK = /tripwire:ignore|gitleaks:allow/;
+
 function makeFinding(file: string, line: number, text: string, service: string): Raw[] {
+  if (IGNORE_MARK.test(text)) return [];
   return matchLine(text).map((m) => {
     const provider = m.rule.id === "tripwire-demo" ? (m.value.split("_")[2] ?? "demo") : m.rule.provider;
     return {
@@ -113,31 +133,50 @@ export function scanHead(dir: string, files: string[], dirs: Set<string>, repoNa
   return out;
 }
 
-/** Scans lines added in recent commits so secrets that were deleted (but never rotated) still show up. */
-export async function scanHistory(dir: string, dirs: Set<string>, repoName: string): Promise<{ raws: Raw[]; commits: number }> {
-  if (!existsSync(join(dir, ".git"))) return { raws: [], commits: 0 };
-  const { stdout } = await run("git", ["-C", dir, "log", "-p", "-U0", "--no-merges", "--no-color", "--no-ext-diff", "--format=__TW__%h", "-n", String(HISTORY_COMMITS)], { maxBuffer: 256 * 1024 * 1024, timeout: 60_000 });
+function parsePatch(patch: string, dirs: Set<string>, repoName: string, inHead: boolean): { raws: Raw[]; commits: number } {
   const raws: Raw[] = [];
   let commit = "";
   let file = "";
   let line = 0;
   let commits = 0;
-  for (const text of stdout.split("\n")) {
+  for (const text of patch.split("\n")) {
     if (text.startsWith("__TW__")) {
       commit = text.slice(6);
       commits++;
     } else if (text.startsWith("+++ ")) file = text.startsWith("+++ b/") ? text.slice(6) : "";
     else if (text.startsWith("@@")) line = Number(text.match(/\+(\d+)/)?.[1] ?? 0);
     else if (text.startsWith("+") && file && !SKIP_FILE.test(file)) {
-      for (const r of makeFinding(file, line, text.slice(1), serviceFor(file, dirs, repoName))) raws.push({ ...r, finding: { ...r.finding, commit, inHead: false } });
+      for (const r of makeFinding(file, line, text.slice(1), serviceFor(file, dirs, repoName))) raws.push({ ...r, finding: { ...r.finding, commit: commit || undefined, inHead } });
       line++;
     }
   }
   return { raws, commits };
 }
 
+const GIT_BUF = { maxBuffer: 256 * 1024 * 1024, timeout: 60_000 };
+
+/** Scans lines added in recent commits so secrets that were deleted (but never rotated) still show up. */
+export async function scanHistory(dir: string, dirs: Set<string>, repoName: string, limit = HISTORY_COMMITS): Promise<{ raws: Raw[]; commits: number }> {
+  if (limit <= 0 || !existsSync(join(dir, ".git"))) return { raws: [], commits: 0 };
+  const { stdout } = await run("git", ["-C", dir, "log", "-p", "-U0", "--no-merges", "--no-color", "--no-ext-diff", "--format=__TW__%h", "-n", String(limit)], GIT_BUF);
+  return parsePatch(stdout, dirs, repoName, false);
+}
+
+/** Lines added between `base` and HEAD, i.e. what a pull request introduces. Fetches `base` if a shallow checkout lacks it. */
+export async function scanDiff(dir: string, dirs: Set<string>, repoName: string, base: string): Promise<Raw[]> {
+  const diff = () => run("git", ["-C", dir, "diff", "-U0", "--no-color", "--no-ext-diff", base, "HEAD"], GIT_BUF);
+  let out: { stdout: string };
+  try {
+    out = await diff();
+  } catch {
+    await run("git", ["-C", dir, "fetch", "--quiet", "--no-tags", "--depth=1", "origin", base], { timeout: 60_000 });
+    out = await diff();
+  }
+  return parsePatch(out.stdout, dirs, repoName, true).raws;
+}
+
 /** Merges HEAD and history hits: one finding per distinct secret value; history-only ones are flagged. */
-export function mergeFindings(head: Raw[], history: Raw[]): { findings: Finding[]; samples: Map<string, string> } {
+export function mergeFindings(head: Raw[], history: Raw[], added?: Set<string>): { findings: Finding[]; samples: Map<string, string> } {
   const byValue = new Map<string, Raw>();
   for (const r of head) if (!byValue.has(r.value)) byValue.set(r.value, r);
   for (const r of history) {
@@ -148,6 +187,7 @@ export function mergeFindings(head: Raw[], history: Raw[]): { findings: Finding[
   const samples = new Map<string, string>();
   const findings = [...byValue.values()].map((r, i) => {
     r.finding.id = `f-${i}`;
+    if (added) r.finding.isNew = added.has(r.value);
     if (r.finding.rule === "db-url") samples.set(r.finding.id, r.value);
     return r.finding;
   });
@@ -167,6 +207,27 @@ export function ciSecretRefs(dir: string, files: string[]): CiSecretRef[] {
       });
   }
   return [...refs.values()];
+}
+
+/** `.tripwireignore`: one glob per line (`docs/**`, `*.test.ts`, `fixtures/`), `#` for comments. */
+export function ignoreMatcher(text: string): (file: string) => boolean {
+  const res = text
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith("#"))
+    .map((glob) => {
+      const dirOnly = glob.endsWith("/");
+      const g = glob.replace(/^\/|\/$/g, "");
+      const body = g.split("**").map((part) => part.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]")).join(".*");
+      const anchored = g.includes("/") ? `^${body}` : `(?:^|/)${body}`;
+      return new RegExp(`${anchored}${dirOnly ? "/" : "(?:$|/)"}`);
+    });
+  return (file) => res.some((re) => re.test(file));
+}
+
+export function loadIgnore(dir: string): (file: string) => boolean {
+  const p = join(dir, ".tripwireignore");
+  return ignoreMatcher(existsSync(p) ? readFileSync(p, "utf8") : "");
 }
 
 export function repoNameOf(target: string, dir: string): string {

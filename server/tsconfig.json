@@ -9,5 +9,5 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["*.ts", "real/*.ts", "../shared/*.ts"]
+  "include": ["*.ts", "real/*.ts", "cli/*.ts", "../shared/*.ts"]
 }

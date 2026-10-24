@@ -40,6 +40,26 @@ Switch to **Scan a repo**, paste a GitHub URL or `owner/name`, and press **Scan 
 
 Secret values are never sent to the browser; the UI only shows masked previews. Nothing is sent to any LLM. Breach, honey-secret and rotation beats are simulations and only exist in **Live demo** mode.
 
+## Use it in a project
+
+### CLI
+
+```bash
+npx github:X3PH1RE/tripwire scan .                 # current repo
+npx github:X3PH1RE/tripwire scan owner/repo        # any GitHub repo
+npx github:X3PH1RE/tripwire scan . --diff origin/main --fail-on-vulns high
+```
+
+Exits `1` when something blocks, `0` when clean, `2` on usage errors. By default every secret still in the code blocks; with `--diff <base>` only secrets added since `<base>` block, so existing debt doesn't fail every PR. Secrets found only in history are reported but never block (rotate them). Other flags: `--history <n>`, `--skip-vulns`, `--no-fail-secrets`, `--json <file|->`, `--markdown <file>`. Inside this repo: `npm run scan -- <target>`.
+
+False positives: add `tripwire:ignore` (or `gitleaks:allow`) on the line, or globs to `.tripwireignore` (`fixtures/`, `*.test.ts`, `docs/**/*.md`).
+
+### GitHub Action
+
+Copy [examples/tripwire.yml](examples/tripwire.yml) to `.github/workflows/tripwire.yml`. On pull requests it fails only when the PR adds a secret, annotates the offending lines, and keeps one summary comment up to date with the secrets, what each unlocks, and vulnerable dependencies. On pushes it fails while any secret is in the code. Inputs: `path`, `fail-on-secrets`, `fail-on-vulns`, `comment`, `history`, `token`. Outputs: `secrets`, `new-secrets`, `vulns`, `failed`.
+
+The action runs `action/action.mjs`, a self-contained bundle (no install step). Rebuild it with `npm run build:cli` after changing `server/real` or `server/cli`.
+
 ## API
 
 `GET /api/state`, `GET /api/events` (SSE), `POST /api/reset`, `GET /api/scan?target=`, `GET /api/blast/:id`, `POST /api/honey/plant`, `POST /api/honey/attack`, `POST /api/breach {provider}`, `POST /api/contain`, `POST /api/cve`, `POST /api/real/scan {target}`, `POST /api/real/fix {keys?}`, `POST /api/real/clear`.

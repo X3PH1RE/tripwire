@@ -18,6 +18,19 @@ const json = (p: string) => {
   }
 };
 
+const LOCKS = ["package-lock.json", "yarn.lock", "pnpm-lock.yaml", "npm-shrinkwrap.json"];
+
+/** True when this package.json or any parent directory (npm/yarn/pnpm workspaces) has a lockfile. */
+function lockedByAncestor(files: string[], pkgFile: string): boolean {
+  const set = new Set(files);
+  const parts = pkgFile.split("/").slice(0, -1);
+  for (let i = parts.length; i >= 0; i--) {
+    const prefix = parts.slice(0, i).join("/");
+    if (LOCKS.some((l) => set.has(prefix ? `${prefix}/${l}` : l))) return true;
+  }
+  return false;
+}
+
 export function parseDeps(dir: string, files: string[]): Dep[] {
   const deps: Dep[] = [];
   const at = (f: string) => join(dir, f);
@@ -37,10 +50,11 @@ export function parseDeps(dir: string, files: string[]): Dep[] {
       } else if (lock?.dependencies) {
         for (const [n, v] of Object.entries<any>(lock.dependencies)) if (v?.version) deps.push({ ecosystem: "npm", name: n, version: v.version, file: f, direct: direct.has(n) });
       }
-    } else if (name === "package.json" && !existsSync(at(sib("package-lock.json")))) {
+    } else if (name === "package.json" && !lockedByAncestor(files, f)) {
+      // Without a lockfile only exact pins say what actually gets installed; ranges like ^1.2.3 resolve to newer versions.
       const pkg = json(at(f)) ?? {};
       for (const [n, spec] of Object.entries<any>({ ...pkg.dependencies, ...pkg.devDependencies })) {
-        const m = typeof spec === "string" && spec.match(/^[\^~=v]?(\d+\.\d+\.\d+(?:-[\w.]+)?)$/);
+        const m = typeof spec === "string" && spec.match(/^=?v?(\d+\.\d+\.\d+(?:-[\w.]+)?)$/);
         if (m) deps.push({ ecosystem: "npm", name: n, version: m[1], file: f, direct: true });
       }
     } else if (/^requirements.*\.txt$/.test(name)) {

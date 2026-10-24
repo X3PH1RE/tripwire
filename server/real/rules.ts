@@ -1,4 +1,10 @@
-import { entropy } from "../scanner";
+function entropy(s: string): number {
+  const counts = new Map<string, number>();
+  for (const ch of s) counts.set(ch, (counts.get(ch) ?? 0) + 1);
+  let h = 0;
+  for (const c of counts.values()) h -= (c / s.length) * Math.log2(c / s.length);
+  return h;
+}
 
 export interface Rule {
   id: string;
@@ -62,7 +68,7 @@ export function matchLine(text: string): Match[] {
   const a = text.match(ASSIGN);
   if (a) {
     const value = a[2];
-    if (value.length >= 16 && value.length <= 200 && !value.includes("://") && !isPlaceholder(value) && !/^[a-z]+(?:[._-][a-z]+)*$/i.test(value) && entropy(value) >= 3.8)
+    if (value.length >= 16 && value.length <= 200 && !value.includes("://") && !/[\\()[\]{}^]/.test(value) && !isPlaceholder(value) && !/^[a-z]+(?:[._-][a-z]+)*$/i.test(value) && entropy(value) >= 3.8)
       out.push({ rule: GENERIC, value, variable: a[1] });
   }
   return out;
