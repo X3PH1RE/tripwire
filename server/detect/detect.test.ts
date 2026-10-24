@@ -183,3 +183,13 @@ test("path-restricted rules only run on matching files", () => {
   const k8s = ["apiVersion: v1", "kind: Secret", "metadata:", "  name: db", "data:", "  password: " + Buffer.from(rand(24)).toString("base64")].join("\n");
   assert.ok(e.scan(k8s, "k8s/secret.yaml").length >= 1);
 });
+
+test("a multi-line key is the same finding whether the file uses CRLF or LF", () => {
+  const e = defaultEngine();
+  const lf = ["-----BEGIN RSA PRIVATE KEY-----", rand(64), rand(64), "-----END RSA PRIVATE KEY-----"].join("\n");
+  const a = e.scan(lf, "k.pem");
+  const b = e.scan(lf.replace(/\n/g, "\r\n"), "k.pem");
+  assert.equal(a.length, 1);
+  assert.equal(b.length, 1);
+  assert.equal(a[0].value, b[0].value);
+});

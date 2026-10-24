@@ -277,7 +277,9 @@ export class Engine {
       if (r.reject) return undefined;
       if (r.confidence) confidence = r.confidence;
     }
-    const value = def.reportGroup ? (groupValue(def.reportGroup) ?? m[0]) : secret;
+    // A key checked out with CRLF and the same key read back from git (LF) must be one finding, not two.
+    const reported = def.reportGroup ? (groupValue(def.reportGroup) ?? m[0]) : secret;
+    const value = def.multiline ? reported.replace(/\r/g, "") : reported;
     return { rule, value, variable, line: lineNo, confidence };
   }
 

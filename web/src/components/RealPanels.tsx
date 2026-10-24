@@ -79,6 +79,9 @@ function FindingRow({ f, onSelect }: { f: Finding; onSelect: (id: string) => voi
         <span className="truncate font-mono text-[13px] font-medium text-zinc-100">{f.variable ?? f.ruleLabel}</span>
         <span className="flex shrink-0 gap-1">
           {f.verify && <span className={`${pill} ${VERIFY[f.verify.status]}`}>{f.verify.status}</span>}
+          {f.baselined && <span className={`${pill} bg-zinc-500/10 text-zinc-300 ring-zinc-500/25`} title="Accepted in .tripwire-baseline.json">baselined</span>}
+          {f.confidence && f.confidence !== "high" && <span className={`${pill} bg-sky-500/10 text-sky-300 ring-sky-500/25`} title="Name-based or example-context match: more likely a false positive than a provider-format token">{f.confidence} confidence</span>}
+          {f.via && <span className={`${pill} bg-violet-500/10 text-violet-300 ring-violet-500/25`} title="The value was hidden inside an encoded string">{f.via}</span>}
           <span className={`${pill} ${f.inHead ? "bg-rose-500/10 text-rose-300 ring-rose-500/25" : "bg-amber-500/10 text-amber-300 ring-amber-500/25"}`}>{f.inHead ? "in code" : "history"}</span>
         </span>
       </div>

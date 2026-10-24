@@ -1072,7 +1072,8 @@ var Engine = class {
       if (r.reject) return void 0;
       if (r.confidence) confidence = r.confidence;
     }
-    const value = def.reportGroup ? groupValue(def.reportGroup) ?? m[0] : secret;
+    const reported = def.reportGroup ? groupValue(def.reportGroup) ?? m[0] : secret;
+    const value = def.multiline ? reported.replace(/\r/g, "") : reported;
     return { rule: rule2, value, variable, line: lineNo, confidence };
   }
   /** Fallback for `NAME_KEY=<random-looking value>` when no provider rule matched. */
