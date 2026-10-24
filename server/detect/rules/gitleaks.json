@@ -540,6 +540,7 @@
    ],
    "source": "gitleaks",
    "confidence": "high",
+   "multiline": true,
    "entropy": 2.75
   },
   {
@@ -552,6 +553,7 @@
    ],
    "source": "gitleaks",
    "confidence": "high",
+   "multiline": true,
    "entropy": 2,
    "allowlists": [
     {
@@ -2050,17 +2052,6 @@
    "source": "gitleaks",
    "confidence": "high",
    "entropy": 2
-  },
-  {
-   "id": "private-key",
-   "label": "Private key",
-   "provider": "ssh",
-   "regex": "(?i)-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----[\\s\\S-]{64,}?KEY(?: BLOCK)?-----",
-   "keywords": [
-    "-----begin"
-   ],
-   "source": "gitleaks",
-   "confidence": "high"
   },
   {
    "id": "privateai-api-token",

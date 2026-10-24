@@ -8,7 +8,7 @@ import type { VulnPackage } from "../../shared/types";
 import { patchPackageJson, patchRequirements } from "./fix";
 import { buildGraph } from "./graph";
 import { compareVersions, fixedFor } from "./osv";
-import { mask, matchLine } from "./rules";
+import { mask, matchContent, matchLine } from "./rules";
 import { ciSecretRefs, manifestDirs, mergeFindings, scanHead, scanHistory, walk } from "./scan";
 
 // Token-shaped strings are assembled at runtime so no provider-format secret is ever committed.
@@ -17,13 +17,15 @@ let seed = 7;
 const rand = (n: number) => Array.from({ length: n }, () => ALPHA[(seed = (seed * 1103515245 + 12345) % 2147483648) % ALPHA.length]).join("");
 const GH = ["ghp", rand(36)].join("_");
 const AWS = ["AKIA", "Q3MXR7ZB2KD4WT6N"].join("");
+const PEM = ["-----BEGIN OPENSSH PRIVATE KEY-----", rand(70), rand(70), "-----END OPENSSH PRIVATE KEY-----"].join("\n");
 const STRIPE = ["sk", "live", rand(24)].join("_");
 
 test("provider rules find real token formats", () => {
   assert.equal(matchLine(`GH_TOKEN=${GH}`)[0].rule.id, "github-pat");
   assert.equal(matchLine(`aws_access_key_id = ${AWS}`)[0].rule.id, "aws-access-key");
   assert.equal(matchLine(`const stripe = "${STRIPE}"`)[0].rule.id, "stripe-live");
-  assert.equal(matchLine("-----BEGIN OPENSSH PRIVATE KEY-----")[0].rule.id, "private-key");
+  assert.equal(matchContent(PEM, ".ssh/id")[0].rule.id, "private-key");
+  assert.deepEqual(matchLine("-----BEGIN OPENSSH PRIVATE KEY-----"), [], "a bare header is not a key");
   const db = matchLine("DATABASE_URL=postgres://app:s3cr3tP4ss@db.internal:5432/app")[0];
   assert.equal(db.rule.id, "db-url");
   assert.equal(db.variable, "DATABASE_URL");

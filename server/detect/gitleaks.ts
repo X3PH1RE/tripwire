@@ -102,7 +102,9 @@ function confidenceOf(regex: string): Confidence {
 }
 
 // Ids Tripwire replaces with its own, better-filtered rule.
-const SKIP = new Set(["generic-api-key"]);
+const SKIP = new Set(["generic-api-key", "private-key"]);
+// Patterns that deliberately span lines.
+const MULTILINE = new Set(["curl-auth-header", "curl-auth-user"]);
 
 interface TomlAllowlist {
   description?: string;
@@ -136,6 +138,7 @@ export function importGitleaks(toml: string): Pack {
       source: "gitleaks",
       confidence: confidenceOf(r.regex),
     };
+    if (MULTILINE.has(r.id)) def.multiline = true;
     if (r.secretGroup) def.secretGroup = r.secretGroup;
     if (r.entropy) def.entropy = r.entropy;
     if (r.path) def.path = translateGoRegex(r.path);

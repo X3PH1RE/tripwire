@@ -6,7 +6,8 @@ const rule = (r: Omit<RuleDef, "source">): RuleDef => ({ ...r, source: "tripwire
 export const tripwirePack: Pack = {
   source: "tripwire",
   rules: [
-    rule({ id: "private-key", label: "Private key", provider: "ssh", regex: "-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----", keywords: ["private key"] }),
+    // Only a complete BEGIN..END block counts; a bare header in docs or a truncated example does not.
+    rule({ id: "private-key", label: "Private key", provider: "ssh", multiline: true, regex: "-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----[\\w+/=:,.\\s-]{40,}?-----END (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----", keywords: ["private key"] }),
     rule({ id: "aws-access-key", label: "AWS access key ID", provider: "aws", regex: "\\b((?:AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16})\\b", keywords: ["akia", "asia", "abia", "acca"] }),
     rule({ id: "aws-secret-key", label: "AWS secret access key", provider: "aws", regex: "(?i)aws_?secret_?(?:access_?)?key[\"']?\\s*[:=]\\s*[\"']?([A-Za-z0-9/+=]{40})\\b", keywords: ["aws"] }),
     rule({ id: "github-pat", label: "GitHub token", provider: "github", regex: "\\b((?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,255})\\b", keywords: ["ghp_", "gho_", "ghu_", "ghs_", "ghr_"], check: "github-checksum" }),

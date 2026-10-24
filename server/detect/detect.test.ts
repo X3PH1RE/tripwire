@@ -102,3 +102,15 @@ test("benign shapes", () => {
   assert.ok(looksBenign("v1.2.3"));
   assert.ok(!looksBenign(rand(32)));
 });
+
+test("private keys need the full block and report the line they start on", () => {
+  const e = defaultEngine();
+  const pem = ["-----BEGIN RSA PRIVATE KEY-----", rand(64), rand(64), "-----END RSA PRIVATE KEY-----"].join("\n");
+  const hits = e.scan(`# deploy\nKEY=1\n${pem}\nafter`, "deploy.sh");
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].rule.id, "private-key");
+  assert.equal(hits[0].line, 3);
+  assert.equal(e.scan("-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n-----END RSA PRIVATE KEY-----").length, 0, "truncated example");
+  assert.equal(e.scan("-----BEGIN RSA PRIVATE KEY-----").length, 0, "header only");
+  assert.equal(e.scan(pem, "package-lock.json").length, 0, "globally allowlisted path");
+});
