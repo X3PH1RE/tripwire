@@ -16,6 +16,7 @@ function freshState(): DemoState {
     containment: { status: "idle", total: 0, done: 0, rotations: [] },
     cve: { status: "idle", steps: [] },
     scan: emptyScan(),
+    honeyTokens: [],
   };
 }
 
@@ -30,9 +31,9 @@ export function currentGeneration(): number {
 export function resetState(): void {
   generation++;
   resetRuntime();
-  const scan = state.scan;
+  const { scan, honeyTokens } = state;
   state = freshState();
-  state.scan = scan;
+  Object.assign(state, { scan, honeyTokens });
   boosts = {};
   broadcast();
 }

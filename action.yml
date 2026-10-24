@@ -20,6 +20,9 @@ inputs:
   history:
     description: Commits of git history to scan. Use actions/checkout with fetch-depth 0 to scan beyond the checkout depth.
     default: "300"
+  verify:
+    description: Ask each provider (read-only) whether found keys still work and what they can reach. Revoked keys stop failing the check.
+    default: "false"
   token:
     description: Token used to comment on pull requests.
     default: ${{ github.token }}

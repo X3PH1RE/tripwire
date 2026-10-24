@@ -7,7 +7,7 @@ import { cleanupInBackground, simulateCve } from "./cve";
 import { blastHops } from "./graph";
 import { PROVIDERS, plantTripwires, simulateAttacker, simulateBreach } from "./incidents";
 import { cannedBlast, generate } from "./llm";
-import { clearScan, startFix, startScan } from "./real/index";
+import { clearScan, createHoney, honeyAction, plantHoney, pollHoney, startFix, startHoneyPolling, startScan } from "./real/index";
 import { contain } from "./rotation";
 import { scanTarget } from "./scanner";
 import { resetState, snapshot, state, subscribe, world } from "./state";
@@ -15,6 +15,7 @@ import { resetState, snapshot, state, subscribe, world } from "./state";
 config({ path: resolve(ROOT, ".env.local"), quiet: true });
 resetState();
 cleanupInBackground();
+startHoneyPolling();
 
 const app = express();
 app.use(express.json());
@@ -93,7 +94,7 @@ app.get("/api/scan", (req, res) => {
 app.post("/api/real/scan", (req, res) => {
   const target = typeof req.body?.target === "string" ? req.body.target.trim() : "";
   if (!target) return void res.status(400).json({ error: "target required" });
-  startScan(target);
+  startScan(target, req.body?.verify === true);
   res.json({ ok: true });
 });
 
@@ -105,6 +106,25 @@ app.post("/api/real/fix", (req, res) => {
 
 app.post("/api/real/clear", (_req, res) => {
   clearScan();
+  res.json({ ok: true });
+});
+
+app.post("/api/real/honey", async (req, res) => {
+  const repo = typeof req.body?.repo === "string" ? req.body.repo : state.scan.repo;
+  const plant = req.body?.plant !== false && !!repo;
+  try {
+    await honeyAction(async () => {
+      const r = await createHoney({ memo: `Tripwire honey secret${repo ? ` for ${repo}` : ""}`, email: req.body?.email || undefined, repo });
+      if (plant) await plantHoney(r.id, repo!, req.body?.file || undefined);
+    }, plant ? "Creating and planting decoy…" : "Creating decoy…");
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
+  }
+});
+
+app.post("/api/real/honey/check", async (_req, res) => {
+  await honeyAction(pollHoney, "Checking for use…").catch(() => undefined);
   res.json({ ok: true });
 });
 

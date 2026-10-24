@@ -2,10 +2,13 @@ import { writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import type { Severity } from "../../shared/types";
 import { scanTarget } from "../real/core";
+import { checkHoney, createHoney, decoyFile, HONEY_FILE, plantHoney, publicHoney } from "../real/honey";
 import { githubReport, upsertPrComment } from "./github";
 import { evaluate, RANK, toMarkdown, toText } from "./report";
 
 export const HELP = `Usage: tripwire scan [path | git url | owner/repo] [options]
+       tripwire honey create [--email you@x.com] [--plant owner/repo] [--file path]
+       tripwire honey check      (exit 1 if any decoy was used)
 
 Finds secrets in the code and git history, maps what each one unlocks,
 and checks dependencies against OSV.dev. Exits 1 when something blocks.
@@ -16,6 +19,7 @@ Options:
   --fail-on-vulns <sev>   Also fail on vulnerable deps: low|moderate|high|critical (default: none)
   --no-fail-secrets       Report secrets without failing
   --skip-vulns            Skip the dependency check
+  --verify                Ask each provider (read-only) if found keys work and what they reach
   --json <file|->         Write the full report as JSON
   --markdown <file>       Write a Markdown report
   --github                GitHub Actions: annotations, job summary, outputs
@@ -36,6 +40,10 @@ export async function main(argv: string[], log: (s: string) => void = (s) => pro
       "fail-on-vulns": { type: "string", default: "none" },
       "no-fail-secrets": { type: "boolean" },
       "skip-vulns": { type: "boolean" },
+      verify: { type: "boolean" },
+      email: { type: "string" },
+      plant: { type: "string" },
+      file: { type: "string" },
       json: { type: "string" },
       markdown: { type: "string" },
       github: { type: "boolean" },
@@ -46,13 +54,14 @@ export async function main(argv: string[], log: (s: string) => void = (s) => pro
   });
   const [cmd, target = "."] = positionals;
   if (values.help || !cmd) return log(HELP), 0;
+  if (cmd === "honey") return honey(positionals[1], values, log, err);
   if (cmd !== "scan") return err(`Unknown command "${cmd}".\n\n${HELP}`), 2;
   const failVulns = values["fail-on-vulns"]!.toUpperCase();
   if (failVulns !== "NONE" && !(failVulns in RANK)) return err(`--fail-on-vulns must be one of low, moderate, high, critical, none\n`), 2;
   const history = values.history === undefined ? undefined : Number(values.history);
   if (history !== undefined && !(history >= 0)) return err("--history must be a number >= 0\n"), 2;
 
-  const report = await scanTarget(target, { history, diff: values.diff, vulns: !values["skip-vulns"] }, (stage) => !values.quiet && err(`tripwire: ${stage}…\n`));
+  const report = await scanTarget(target, { history, diff: values.diff, vulns: !values["skip-vulns"], verify: !!values.verify }, (stage) => !values.quiet && err(`tripwire: ${stage}…\n`));
   const verdict = evaluate(report, { secrets: !values["no-fail-secrets"], vulns: failVulns === "NONE" ? "none" : (failVulns as Severity) });
   const markdown = toMarkdown(report, verdict);
 
@@ -66,4 +75,28 @@ export async function main(argv: string[], log: (s: string) => void = (s) => pro
     err(`tripwire: ${note}\n`);
   }
   return verdict.failed ? 1 : 0;
+}
+
+async function honey(sub: string | undefined, values: { email?: string; plant?: string; file?: string }, log: (s: string) => void, err: (s: string) => void): Promise<number> {
+  if (sub === "create") {
+    const r = await createHoney({ memo: `Tripwire honey secret${values.plant ? ` for ${values.plant}` : ""}`, email: values.email, repo: values.plant });
+    log(`Created decoy AWS key ${r.accessKeyId} (stored in ${HONEY_FILE}).\n`);
+    if (values.plant) {
+      const planted = await plantHoney(r.id, values.plant, values.file);
+      log(`Planting PR: ${planted.prUrl}\n`);
+    } else log(`\nPaste this somewhere an attacker would look (.env, CI config, backups):\n\n${decoyFile(r)}\n`);
+    return 0;
+  }
+  if (sub === "check") {
+    const { records } = await checkHoney();
+    if (!records.length) return log("No honey secrets yet. Run `tripwire honey create` first.\n"), 0;
+    let used = 0;
+    for (const t of records.map(publicHoney)) {
+      log(`${t.accessKeyPreview}  ${t.repo ?? "unplanted"}${t.file ? `:${t.file}` : ""}  ${t.hits.length ? `USED ${t.hits.length}x` : "quiet"}${t.checkError ? `  (check failed: ${t.checkError})` : ""}\n`);
+      for (const h of t.hits.slice(0, 5)) log(`    ${new Date(h.at).toISOString()}  ${h.ip ?? "?"}  ${[h.location, h.org].filter(Boolean).join(" · ")}  ${h.action ?? ""}\n`);
+      used += t.hits.length;
+    }
+    return used ? 1 : 0;
+  }
+  return err(`Usage: tripwire honey create|check\n`), 2;
 }

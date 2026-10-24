@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 
 // server/cli/main.ts
-import { writeFileSync } from "node:fs";
+import { writeFileSync as writeFileSync2 } from "node:fs";
 import { parseArgs } from "node:util";
 
 // server/real/core.ts
-import { existsSync as existsSync3, rmSync as rmSync2 } from "node:fs";
+import { existsSync as existsSync4, rmSync as rmSync2 } from "node:fs";
 import { resolve as resolve2 } from "node:path";
 
 // server/real/graph.ts
@@ -96,13 +96,18 @@ function buildGraph(repoName, findings, ciRefs, samples) {
     }
     const serviceId = `r-svc-${slug(f.service)}`;
     add({ id: serviceId, type: "service", label: f.service, version: f.service === "CI (GitHub Actions)" ? "workflows" : void 0, status: "ok", position: { x: COL.service, y: 0 } });
-    const node = add({ id, type: "secret", label: name, file: f.file, line: f.line, provider: f.provider, status: "exposed", badge: f.inHead ? void 0 : "history", position: { x: COL.secret, y: 0 } });
+    const v = f.verify?.status;
+    const badge = v === "live" ? "live" : v === "revoked" ? "revoked" : v === "honey" ? "honey" : f.inHead ? void 0 : "history";
+    const node = add({ id, type: v === "honey" ? "decoy" : "secret", label: name, file: f.file, line: f.line, provider: f.provider, status: v === "revoked" ? "rotated" : "exposed", badge, position: { x: COL.secret, y: 0 } });
     secretRows.push({ want: row++ * ROW, node });
     link(serviceId, id, "stored_in");
-    const r = resourceFor(f.provider, f.variable, samples.get(f.id));
-    const rid = `r-res-${slug(r.key)}`;
-    add({ id: rid, type: "resource", label: r.label, sensitivity: r.sensitivity, provider: r.provider, status: "exposed", position: { x: COL.resource, y: 0 } });
-    link(id, rid, "unlocks");
+    if (v === "revoked" || v === "honey") continue;
+    const reach2 = f.verify?.access?.length ? f.verify.access.map((a) => ({ key: `v-${f.provider}-${a.label}`, label: a.label, sensitivity: a.sensitivity, provider: f.provider })) : [resourceFor(f.provider, f.variable, samples.get(f.id))];
+    for (const r of reach2.slice(0, 6)) {
+      const rid = `r-res-${slug(r.key)}`;
+      add({ id: rid, type: "resource", label: r.label, sensitivity: r.sensitivity, provider: r.provider, status: "exposed", position: { x: COL.resource, y: 0 } });
+      link(id, rid, "unlocks");
+    }
   }
   settle(secretRows);
   const scm = byId.get("r-res-scm");
@@ -136,12 +141,184 @@ function buildGraph(repoName, findings, ciRefs, samples) {
   return { nodes, edges };
 }
 
-// server/real/osv.ts
-import { readFileSync } from "node:fs";
+// server/real/honey.ts
+import { randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+
+// server/github.ts
+var API = "https://api.github.com";
+var hasToken = () => !!process.env.GITHUB_TOKEN;
+async function gh(path, init = {}) {
+  const res = await fetch(`${API}${path}`, {
+    method: init.method ?? "GET",
+    headers: {
+      Authorization: `Bearer ${process.env.GITHUB_TOKEN}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "Content-Type": "application/json"
+    },
+    body: init.body ? JSON.stringify(init.body) : void 0,
+    signal: AbortSignal.timeout(1e4)
+  });
+  if (!res.ok) {
+    const msg = (await res.json().catch(() => ({}))).message;
+    throw new Error(`GitHub ${init.method ?? "GET"} ${path}: ${res.status}${msg ? ` ${msg}` : ""}`);
+  }
+  return res.status === 204 ? void 0 : await res.json();
+}
+async function repoInfo(repo) {
+  return gh(`/repos/${repo}`);
+}
+async function openMultiFilePr(repo, opts) {
+  const head = await gh(`/repos/${repo}/git/ref/heads/${opts.base}`);
+  const parent = await gh(`/repos/${repo}/git/commits/${head.object.sha}`);
+  const tree = await gh(`/repos/${repo}/git/trees`, { method: "POST", body: { base_tree: parent.tree.sha, tree: opts.files.map((f) => ({ path: f.path, mode: "100644", type: "blob", content: f.content })) } });
+  const commit = await gh(`/repos/${repo}/git/commits`, { method: "POST", body: { message: opts.message, tree: tree.sha, parents: [parent.sha] } });
+  await gh(`/repos/${repo}/git/refs`, { method: "POST", body: { ref: `refs/heads/${opts.branch}`, sha: commit.sha } });
+  const pr = await gh(`/repos/${repo}/pulls`, { method: "POST", body: { title: opts.title, body: opts.body, head: opts.branch, base: opts.base } });
+  return { url: pr.html_url, number: pr.number };
+}
+
+// server/real/honey.ts
+var CANARY = process.env.CANARYTOKENS_URL ?? "https://canarytokens.org";
+var API2 = `${CANARY}/d3aece8093b71007b5ccfedad91ebb11`;
+var HONEY_FILE = process.env.TRIPWIRE_HONEY_FILE ?? join(process.env.TRIPWIRE_HOME ?? join(homedir(), ".tripwire"), "honey.json");
+var HONEY_BRANCH_PREFIX = "tripwire/honey-";
+function loadHoney() {
+  try {
+    return existsSync(HONEY_FILE) ? JSON.parse(readFileSync(HONEY_FILE, "utf8")) : [];
+  } catch {
+    return [];
+  }
+}
+function saveHoney(records) {
+  mkdirSync(dirname(HONEY_FILE), { recursive: true });
+  writeFileSync(HONEY_FILE, JSON.stringify(records, null, 2), { mode: 384 });
+}
+var honeyKeyIds = () => new Set(loadHoney().flatMap((r) => [r.accessKeyId, r.secretAccessKey]));
+var mask = (s) => `${s.slice(0, 8)}\u2022\u2022\u2022\u2022${s.slice(-4)}`;
+function publicHoney(r) {
+  return {
+    id: r.id,
+    accessKeyPreview: mask(r.accessKeyId),
+    memo: r.memo,
+    createdAt: r.createdAt,
+    repo: r.prUrl ? r.repo : void 0,
+    file: r.prUrl ? r.file : void 0,
+    prUrl: r.prUrl,
+    snippet: r.prUrl ? void 0 : decoyFile(r),
+    historyUrl: `${CANARY}/history?token=${r.token}&auth=${r.auth}`,
+    lastCheck: r.lastCheck,
+    checkError: r.checkError,
+    hits: r.hits
+  };
+}
+async function createHoney(opts) {
+  const email = opts.email ?? process.env.HONEY_ALERT_EMAIL;
+  const webhook = opts.webhook ?? process.env.HONEY_ALERT_WEBHOOK;
+  if (!email && !webhook) throw new Error("Set HONEY_ALERT_EMAIL (or HONEY_ALERT_WEBHOOK) so Canarytokens knows where to send alerts.");
+  const res = await fetch(`${API2}/generate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token_type: "aws_keys", memo: opts.memo, email: email ?? "", webhook_url: webhook ?? "" }),
+    signal: AbortSignal.timeout(2e4)
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.error || !data.aws_access_key_id) throw new Error(`Canarytokens: ${data.error_message ?? data.error ?? res.status}`);
+  const record = {
+    id: randomUUID().slice(0, 8),
+    token: data.token,
+    auth: data.auth_token,
+    accessKeyId: data.aws_access_key_id,
+    secretAccessKey: data.aws_secret_access_key,
+    region: data.region ?? "us-east-1",
+    memo: opts.memo,
+    createdAt: Date.now(),
+    repo: opts.repo,
+    hits: []
+  };
+  saveHoney([...loadHoney(), record]);
+  return record;
+}
+var first = (v) => Array.isArray(v) ? v[0] : v;
+function parseHits(raw) {
+  return raw.map((h) => {
+    const geo = h.geo_info && typeof h.geo_info === "object" ? h.geo_info : {};
+    const log = h.additional_info?.aws_key_log_data ?? h.additional_info?.["AWS Key Log Data"] ?? {};
+    return {
+      at: Math.round(Number(h.time_of_hit) * 1e3),
+      ip: h.src_ip || void 0,
+      location: [geo.city, geo.country].filter(Boolean).join(", ") || void 0,
+      org: geo.org || void 0,
+      userAgent: h.useragent ?? h.user_agent ?? void 0,
+      action: first(log.eventName) ?? first(log.service_used) ?? void 0
+    };
+  }).sort((a, b) => b.at - a.at);
+}
+async function checkHoney() {
+  const records = loadHoney();
+  const fresh = [];
+  for (const r of records) {
+    try {
+      const res = await fetch(`${API2}/history?token=${encodeURIComponent(r.token)}&auth=${encodeURIComponent(r.auth)}`, { signal: AbortSignal.timeout(15e3) });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      const hits = parseHits(data?.history?.hits ?? []);
+      const known = new Set(r.hits.map((h) => h.at));
+      for (const hit of hits) if (!known.has(hit.at)) fresh.push({ record: r, hit });
+      r.hits = hits;
+      r.checkError = void 0;
+    } catch (err) {
+      r.checkError = err.message;
+    }
+    r.lastCheck = Date.now();
+  }
+  const latest = loadHoney();
+  saveHoney(latest.map((l) => records.find((r) => r.id === l.id) ?? l));
+  return { records, fresh };
+}
+function decoyFile(r) {
+  return ["# Backup job credentials (read-only bucket). Rotated quarterly.", `AWS_ACCESS_KEY_ID=${r.accessKeyId}`, `AWS_SECRET_ACCESS_KEY=${r.secretAccessKey}`, `AWS_DEFAULT_REGION=${r.region}`, ""].join("\n");
+}
+async function plantHoney(id, repo, file = "deploy/backup.env") {
+  if (!hasToken()) throw new Error("GITHUB_TOKEN not set");
+  const records = loadHoney();
+  const r = records.find((x) => x.id === id);
+  if (!r) throw new Error(`No honey secret ${id}`);
+  const info = await repoInfo(repo);
+  const exists = await gh(`/repos/${repo}/contents/${file}?ref=${info.default_branch}`).then(() => true, () => false);
+  if (exists) throw new Error(`${file} already exists in ${repo}`);
+  const pr = await openMultiFilePr(repo, {
+    base: info.default_branch,
+    branch: `${HONEY_BRANCH_PREFIX}${r.id}`,
+    files: [{ path: file, content: decoyFile(r) }],
+    message: "chore: add backup job config",
+    title: "Tripwire: plant honey credentials",
+    body: [
+      `Adds \`${file}\` with a **decoy** AWS key from [Canarytokens](https://canarytokens.org). It has no permissions on anything.`,
+      "",
+      "If anyone ever uses it (someone scraping the repo, a leaked clone, an insider), Tripwire and the alert email/webhook get the source IP, user agent and the AWS call they tried.",
+      "",
+      "Merge it to arm the tripwire. Do not mention it elsewhere in the repo."
+    ].join("\n")
+  }).catch((err) => {
+    if (/Secret detected|push protection|rule violations/i.test(err.message))
+      throw new Error("GitHub push protection blocked the decoy because it is a real AWS-format key (the same check would block a real leak). The decoy is saved; place it where GitHub doesn't scan: CI/CD variables, a server .env, an S3 backup, an internal wiki.");
+    throw err;
+  });
+  Object.assign(r, { repo, file, prUrl: pr.url });
+  saveHoney(records);
+  return r;
+}
+
+// server/real/osv.ts
+import { readFileSync as readFileSync2 } from "node:fs";
+import { dirname as dirname2, join as join2 } from "node:path";
 var json = (p) => {
   try {
-    return JSON.parse(readFileSync(p, "utf8"));
+    return JSON.parse(readFileSync2(p, "utf8"));
   } catch {
     return void 0;
   }
@@ -158,10 +335,10 @@ function lockedByAncestor(files, pkgFile) {
 }
 function parseDeps(dir, files) {
   const deps = [];
-  const at = (f) => join(dir, f);
+  const at = (f) => join2(dir, f);
   for (const f of files) {
     const name = f.split("/").pop();
-    const sib = (n) => dirname(f) === "." ? n : `${dirname(f)}/${n}`;
+    const sib = (n) => dirname2(f) === "." ? n : `${dirname2(f)}/${n}`;
     if (name === "package-lock.json") {
       const lock = json(at(f));
       const pkg = json(at(sib("package.json"))) ?? {};
@@ -182,13 +359,13 @@ function parseDeps(dir, files) {
         if (m) deps.push({ ecosystem: "npm", name: n, version: m[1], file: f, direct: true });
       }
     } else if (/^requirements.*\.txt$/.test(name)) {
-      for (const l of readFileSync(at(f), "utf8").split(/\r?\n/)) {
+      for (const l of readFileSync2(at(f), "utf8").split(/\r?\n/)) {
         const m = l.match(/^\s*([A-Za-z0-9_.-]+)(?:\[[^\]]*\])?\s*==\s*([^\s;#]+)/);
         if (m) deps.push({ ecosystem: "PyPI", name: m[1], version: m[2], file: f, direct: true });
       }
     } else if (name === "go.mod") {
       let block = false;
-      for (const l of readFileSync(at(f), "utf8").split(/\r?\n/)) {
+      for (const l of readFileSync2(at(f), "utf8").split(/\r?\n/)) {
         if (/^require\s*\($/.test(l.trim())) block = true;
         else if (l.trim() === ")") block = false;
         const m = (block ? l : l.replace(/^require\s+/, "")).trim().match(/^([\w./-]+\.[\w./-]+)\s+v([\w.+-]+)(\s*\/\/ indirect)?/);
@@ -199,7 +376,7 @@ function parseDeps(dir, files) {
       const req = Object.keys((json(at(sib("composer.json"))) ?? {}).require ?? {});
       for (const p of [...lock?.packages ?? [], ...lock?.["packages-dev"] ?? []]) deps.push({ ecosystem: "Packagist", name: p.name, version: String(p.version).replace(/^v/, ""), file: f, direct: req.includes(p.name) });
     } else if (name === "Gemfile.lock") {
-      const text = readFileSync(at(f), "utf8");
+      const text = readFileSync2(at(f), "utf8");
       const direct = new Set([...(text.split(/^DEPENDENCIES$/m)[1] ?? "").matchAll(/^\s{2}([\w.-]+)/gm)].map((m) => m[1]));
       for (const m of text.matchAll(/^ {4}([\w.-]+) \(([\d.]+)\)$/gm)) deps.push({ ecosystem: "RubyGems", name: m[1], version: m[2], file: f, direct: direct.has(m[1]) });
     }
@@ -280,11 +457,181 @@ async function findVulns(deps) {
   return out.sort((a, b) => RANK[b.severity] - RANK[a.severity] || Number(b.direct) - Number(a.direct) || b.advisories.length - a.advisories.length);
 }
 
+// server/real/verify.ts
+import { createHmac, createHash } from "node:crypto";
+var TIMEOUT = Number(process.env.VERIFY_TIMEOUT_MS ?? 8e3);
+var CONCURRENCY = 6;
+var get = async (url, headers, method = "GET", body) => fetch(url, { method, headers, body, signal: AbortSignal.timeout(TIMEOUT) });
+var live = (identity, access = [], note) => ({ status: "live", identity, access, note });
+var revoked = (note) => ({ status: "revoked", note });
+var hmac = (key, data) => createHmac("sha256", key).update(data, "utf8").digest();
+var sha256 = (s) => createHash("sha256").update(s, "utf8").digest("hex");
+function sigV4(opts) {
+  const amzDate = opts.now.toISOString().replace(/[-:]|\.\d{3}/g, "");
+  const date = amzDate.slice(0, 8);
+  const headers = `content-type:application/x-www-form-urlencoded; charset=utf-8
+host:${opts.host}
+x-amz-date:${amzDate}
+`;
+  const signed = "content-type;host;x-amz-date";
+  const canonical = ["POST", "/", "", headers, signed, sha256(opts.body)].join("\n");
+  const scope = `${date}/${opts.region}/${opts.service}/aws4_request`;
+  const toSign = ["AWS4-HMAC-SHA256", amzDate, scope, sha256(canonical)].join("\n");
+  const kDate = hmac(`AWS4${opts.secret}`, date);
+  const signature = createHmac("sha256", hmac(hmac(hmac(kDate, opts.region), opts.service), "aws4_request")).update(toSign, "utf8").digest("hex");
+  return {
+    "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
+    "X-Amz-Date": amzDate,
+    Authorization: `AWS4-HMAC-SHA256 Credential=${opts.id}/${scope}, SignedHeaders=${signed}, Signature=${signature}`
+  };
+}
+var xml = (text, tag) => text.match(new RegExp(`<${tag}>([^<]*)</${tag}>`))?.[1];
+var xmlAll = (text, tag) => [...text.matchAll(new RegExp(`<${tag}>([^<]*)</${tag}>`, "g"))].map((m) => m[1]);
+async function awsCall(id, secret, service, host, body) {
+  const res = await get(`https://${host}/`, sigV4({ id, secret, service, host, region: "us-east-1", body, now: /* @__PURE__ */ new Date() }), "POST", body);
+  const text = await res.text();
+  return res.ok ? text : void 0;
+}
+async function verifyAws(id, secret) {
+  const res = await get("https://sts.amazonaws.com/", sigV4({ id, secret, service: "sts", host: "sts.amazonaws.com", region: "us-east-1", body: "Action=GetCallerIdentity&Version=2011-06-15", now: /* @__PURE__ */ new Date() }), "POST", "Action=GetCallerIdentity&Version=2011-06-15");
+  const text = await res.text();
+  if (!res.ok) {
+    const code = xml(text, "Code") ?? String(res.status);
+    if (/InvalidClientTokenId|SignatureDoesNotMatch|AccessDenied/.test(code)) return revoked(`AWS rejected the key (${code}).`);
+    return { status: "unverified", note: `AWS returned ${code}.` };
+  }
+  const arn = xml(text, "Arn") ?? "unknown";
+  const account = xml(text, "Account");
+  const user = arn.split("/").pop();
+  const access = [{ label: `AWS account ${account}`, sensitivity: "high", detail: arn }];
+  if (user && arn.includes(":user/")) {
+    const attached = await awsCall(id, secret, "iam", "iam.amazonaws.com", `Action=ListAttachedUserPolicies&UserName=${encodeURIComponent(user)}&Version=2010-05-08`).catch(() => void 0);
+    const inline = await awsCall(id, secret, "iam", "iam.amazonaws.com", `Action=ListUserPolicies&UserName=${encodeURIComponent(user)}&Version=2010-05-08`).catch(() => void 0);
+    const names = [...attached ? xmlAll(attached, "PolicyName") : [], ...inline ? xmlAll(inline, "member") : []];
+    for (const n of new Set(names)) access.push({ label: n === "AdministratorAccess" ? "Full AWS admin" : `IAM policy ${n}`, sensitivity: /Admin|FullAccess|PowerUser/.test(n) ? "production" : "high", detail: `attached to ${user}` });
+    if (!names.length && (attached || inline)) access.push({ label: "No IAM policies attached", sensitivity: "low" });
+  }
+  return live(arn, access, `Live key for ${arn}.`);
+}
+async function verifyGithub(token) {
+  const res = await get("https://api.github.com/user", { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" });
+  if (res.status === 401) return revoked("GitHub rejected the token (401).");
+  if (!res.ok) return { status: "unverified", note: `GitHub returned ${res.status}.` };
+  const user = await res.json();
+  const scopes = (res.headers.get("x-oauth-scopes") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  const access = [];
+  if (scopes.length) for (const s of scopes) access.push({ label: `GitHub scope ${s}`, sensitivity: /^(repo|admin|workflow|write)/.test(s) ? "production" : "medium" });
+  else access.push({ label: "GitHub account (fine-grained token)", sensitivity: "production", detail: "scopes not reported by the API" });
+  const repos = await get("https://api.github.com/user/repos?per_page=100&affiliation=owner,collaborator,organization_member", { Authorization: `Bearer ${token}` }).catch(() => void 0);
+  if (repos?.ok) {
+    const list = await repos.json();
+    const writable = list.filter((r) => r.permissions?.push);
+    if (writable.length) access.push({ label: `Write access to ${writable.length} repo${writable.length === 1 ? "" : "s"}`, sensitivity: "production", detail: writable.slice(0, 5).map((r) => r.full_name).join(", ") });
+    const priv = list.filter((r) => r.private).length;
+    if (priv) access.push({ label: `${priv} private repo${priv === 1 ? "" : "s"} readable`, sensitivity: "high" });
+  }
+  return live(user.login, access, `Live token for @${user.login}.`);
+}
+async function verifyStripe(key) {
+  const res = await get("https://api.stripe.com/v1/account", { Authorization: `Bearer ${key}` });
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 401) return revoked("Stripe rejected the key (401).");
+  if (!res.ok && res.status !== 403) return { status: "unverified", note: `Stripe returned ${res.status}.` };
+  const test = key.includes("_test_");
+  const name = data?.settings?.dashboard?.display_name ?? data?.business_profile?.name ?? data?.id ?? "Stripe account";
+  const access = [{ label: test ? "Stripe test mode" : "Stripe live payments", sensitivity: test ? "low" : "production", detail: data?.id }];
+  if (!test) {
+    const charges = await get("https://api.stripe.com/v1/charges?limit=1", { Authorization: `Bearer ${key}` });
+    if (charges.ok) access.push({ label: "Read customer payment history", sensitivity: "high" });
+  }
+  return live(name, access, res.status === 403 ? "Live but restricted key." : void 0);
+}
+async function verifySlack(token) {
+  const res = await get("https://slack.com/api/auth.test", { Authorization: `Bearer ${token}` });
+  const data = await res.json().catch(() => ({}));
+  if (!data?.ok) return /invalid_auth|token_revoked|account_inactive/.test(data?.error ?? "") ? revoked(`Slack rejected the token (${data.error}).`) : { status: "unverified", note: `Slack: ${data?.error ?? res.status}.` };
+  const scopes = (res.headers.get("x-oauth-scopes") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  const access = [{ label: `Slack workspace ${data.team}`, sensitivity: "high", detail: data.url }];
+  for (const s of scopes.slice(0, 8)) access.push({ label: `Slack scope ${s}`, sensitivity: /admin|channels:history|files|users:read.email/.test(s) ? "high" : "medium" });
+  return live(`${data.user ?? "bot"}@${data.team}`, access);
+}
+async function verifyBearer(name, url, key, headers, label, sensitivity) {
+  const res = await get(url, headers);
+  if (res.status === 401 || res.status === 403) return revoked(`${name} rejected the key (${res.status}).`);
+  if (!res.ok && res.status !== 400) return { status: "unverified", note: `${name} returned ${res.status}.` };
+  return live(`${name} key`, [{ label, sensitivity }], `Live ${name} key \u2014 it can spend on the owner's account.`);
+}
+async function verifyNpm(token) {
+  const res = await get("https://registry.npmjs.org/-/whoami", { Authorization: `Bearer ${token}` });
+  if (res.status === 401) return revoked("npm rejected the token (401).");
+  if (!res.ok) return { status: "unverified", note: `npm returned ${res.status}.` };
+  const who = (await res.json()).username;
+  return live(who, [{ label: "Publish npm packages", sensitivity: "production", detail: `as ${who}` }]);
+}
+async function verifyOne(f, value, context) {
+  switch (f.provider) {
+    case "aws": {
+      if (f.rule === "aws-secret-key") return void 0;
+      const secret = context.get("aws-secret");
+      if (!secret) return { status: "unverified", note: "No matching AWS secret access key was found next to this key ID." };
+      return verifyAws(value, secret);
+    }
+    case "github":
+      return verifyGithub(value);
+    case "stripe":
+    case "stripe-test":
+      return verifyStripe(value);
+    case "slack":
+      return f.rule === "slack-webhook" ? void 0 : verifySlack(value);
+    case "openai":
+      return verifyBearer("OpenAI", "https://api.openai.com/v1/models", value, { Authorization: `Bearer ${value}` }, "OpenAI API billing", "medium");
+    case "anthropic":
+      return verifyBearer("Anthropic", "https://api.anthropic.com/v1/models", value, { "x-api-key": value, "anthropic-version": "2023-06-01" }, "Anthropic API billing", "medium");
+    case "sendgrid":
+      return verifyBearer("SendGrid", "https://api.sendgrid.com/v3/scopes", value, { Authorization: `Bearer ${value}` }, "Send email as the owner's domain", "high");
+    case "npm":
+      return verifyNpm(value);
+    default:
+      return void 0;
+  }
+}
+var VERIFIABLE = /* @__PURE__ */ new Set(["aws", "github", "stripe", "stripe-test", "slack", "openai", "anthropic", "sendgrid", "npm"]);
+async function verifyFindings(findings, values, honeyIds = /* @__PURE__ */ new Set()) {
+  const secrets = findings.filter((f) => f.rule === "aws-secret-key");
+  const pairFor = (f) => {
+    const near = secrets.filter((s) => s.file === f.file).sort((a, b) => Math.abs(a.line - f.line) - Math.abs(b.line - f.line))[0];
+    return near ?? (secrets.length === 1 ? secrets[0] : void 0);
+  };
+  const queue = findings.filter((f) => VERIFIABLE.has(f.provider));
+  let i = 0;
+  const worker = async () => {
+    while (i < queue.length) {
+      const f = queue[i++];
+      const value = values.get(f.id);
+      if (!value) continue;
+      if (honeyIds.has(value)) {
+        f.verify = { status: "honey", identity: "Tripwire decoy", note: "This is a Tripwire honey secret. Using it alerts you; it unlocks nothing." };
+        continue;
+      }
+      const context = /* @__PURE__ */ new Map();
+      const pair = f.rule === "aws-access-key" ? pairFor(f) : void 0;
+      if (pair) context.set("aws-secret", values.get(pair.id));
+      f.verify = await verifyOne(f, value, context).catch((err) => ({ status: "unverified", note: `Check failed: ${err.message}` }));
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, queue.length) }, worker));
+  for (const f of findings) {
+    if (f.rule !== "aws-access-key" || !f.verify) continue;
+    const pair = pairFor(f);
+    if (pair && !pair.verify) pair.verify = f.verify;
+  }
+}
+
 // server/real/scan.ts
 import { execFile } from "node:child_process";
-import { existsSync as existsSync2, mkdtempSync, readdirSync, readFileSync as readFileSync2, rmSync, statSync } from "node:fs";
+import { existsSync as existsSync3, mkdtempSync, readdirSync, readFileSync as readFileSync3, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join as join2, relative, resolve } from "node:path";
+import { basename, join as join3, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 
 // server/real/rules.ts
@@ -342,7 +689,7 @@ function matchLine(text) {
   }
   return out;
 }
-function mask(value, rule) {
+function mask2(value, rule) {
   if (rule.id === "private-key") return "-----BEGIN \u2026 PRIVATE KEY-----";
   if (rule.id === "db-url") return value.replace(/:\/\/([^:/@\s]+):[^@\s]+@/, "://$1:\u2022\u2022\u2022\u2022@").slice(0, 48);
   if (rule.id === "tripwire-demo") return value.length > 22 ? `${value.slice(0, 22)}\u2026` : value;
@@ -360,7 +707,7 @@ var HISTORY_COMMITS = Number(process.env.SCAN_HISTORY_COMMITS ?? 300);
 function walk(dir, root = dir, out = []) {
   for (const name of readdirSync(dir)) {
     if (SKIP_DIRS.has(name)) continue;
-    const full = join2(dir, name);
+    const full = join3(dir, name);
     const st = statSync(full, { throwIfNoEntry: false });
     if (!st) continue;
     if (st.isDirectory()) walk(full, root, out);
@@ -369,11 +716,11 @@ function walk(dir, root = dir, out = []) {
   return out;
 }
 async function listFiles(dir) {
-  if (!existsSync2(join2(dir, ".git"))) return walk(dir);
+  if (!existsSync3(join3(dir, ".git"))) return walk(dir);
   try {
     const { stdout } = await run("git", ["-C", dir, "ls-files", "-z", "-co", "--exclude-standard"], { maxBuffer: 64 * 1024 * 1024 });
     return stdout.split("\0").filter((f) => f && !f.split("/").some((part) => SKIP_DIRS.has(part))).filter((f) => {
-      const st = statSync(join2(dir, f), { throwIfNoEntry: false });
+      const st = statSync(join3(dir, f), { throwIfNoEntry: false });
       return !!st?.isFile() && st.size < 1e6;
     });
   } catch {
@@ -386,12 +733,12 @@ function githubSlug(target) {
 }
 function normalizeTarget(input) {
   const t = input.trim();
-  if (/^[\w.-]+\/[\w.-]+$/.test(t) && !existsSync2(t)) return `https://github.com/${t}.git`;
+  if (/^[\w.-]+\/[\w.-]+$/.test(t) && !existsSync3(t)) return `https://github.com/${t}.git`;
   return t;
 }
 async function cloneRepo(url, depth = HISTORY_COMMITS) {
   if (!/^(https?:\/\/|git@)/.test(url)) throw new Error("Enter a Git URL or owner/name");
-  const tmp = mkdtempSync(join2(tmpdir(), "tripwire-real-"));
+  const tmp = mkdtempSync(join3(tmpdir(), "tripwire-real-"));
   const args = ["clone", "--quiet", "--single-branch", "--no-tags", "--depth", String(Math.max(1, depth)), url, tmp];
   const env = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
   try {
@@ -403,7 +750,7 @@ async function cloneRepo(url, depth = HISTORY_COMMITS) {
       throw new Error(`Clone failed: ${err.message.split("\n")[0]}`);
     }
     rmSync(tmp, { recursive: true, force: true });
-    const retry = mkdtempSync(join2(tmpdir(), "tripwire-real-"));
+    const retry = mkdtempSync(join3(tmpdir(), "tripwire-real-"));
     const auth = Buffer.from(`x-access-token:${token}`).toString("base64");
     try {
       await run("git", ["-c", `http.extraHeader=Authorization: Basic ${auth}`, ...args.slice(0, -1), retry], { timeout: 9e4, env });
@@ -440,7 +787,7 @@ function makeFinding(file, line, text, service) {
     const provider = m.rule.id === "tripwire-demo" ? m.value.split("_")[2] ?? "demo" : m.rule.provider;
     return {
       value: m.value,
-      finding: { id: "", rule: m.rule.id, ruleLabel: m.rule.label, provider, variable: m.variable?.toUpperCase(), file, line, inHead: true, preview: mask(m.value, m.rule), service, nodeId: "" }
+      finding: { id: "", rule: m.rule.id, ruleLabel: m.rule.label, provider, variable: m.variable?.toUpperCase(), file, line, inHead: true, preview: mask2(m.value, m.rule), service, nodeId: "" }
     };
   });
 }
@@ -448,7 +795,7 @@ function scanHead(dir, files, dirs, repoName) {
   const out = [];
   for (const file of files) {
     if (SKIP_FILE.test(file)) continue;
-    const buf = readFileSync2(join2(dir, file));
+    const buf = readFileSync3(join3(dir, file));
     if (buf.includes(0)) continue;
     const service = serviceFor(file, dirs, repoName);
     buf.toString("utf8").split(/\r?\n/).forEach((text, i) => out.push(...makeFinding(file, i + 1, text, service)));
@@ -476,7 +823,7 @@ function parsePatch(patch, dirs, repoName, inHead) {
 }
 var GIT_BUF = { maxBuffer: 256 * 1024 * 1024, timeout: 6e4 };
 async function scanHistory(dir, dirs, repoName, limit = HISTORY_COMMITS) {
-  if (limit <= 0 || !existsSync2(join2(dir, ".git"))) return { raws: [], commits: 0 };
+  if (limit <= 0 || !existsSync3(join3(dir, ".git"))) return { raws: [], commits: 0 };
   const { stdout } = await run("git", ["-C", dir, "log", "-p", "-U0", "--no-merges", "--no-color", "--no-ext-diff", "--format=__TW__%h", "-n", String(limit)], GIT_BUF);
   return parsePatch(stdout, dirs, repoName, false);
 }
@@ -500,18 +847,20 @@ function mergeFindings(head, history, added) {
     else byValue.set(r.value, r);
   }
   const samples = /* @__PURE__ */ new Map();
+  const values = /* @__PURE__ */ new Map();
   const findings = [...byValue.values()].map((r, i) => {
     r.finding.id = `f-${i}`;
     if (added) r.finding.isNew = added.has(r.value);
     if (r.finding.rule === "db-url") samples.set(r.finding.id, r.value);
+    values.set(r.finding.id, r.value);
     return r.finding;
   });
-  return { findings, samples };
+  return { findings, samples, values };
 }
 function ciSecretRefs(dir, files) {
   const refs = /* @__PURE__ */ new Map();
   for (const file of files.filter((f) => /^\.github\/workflows\/[^/]+\.ya?ml$/.test(f))) {
-    readFileSync2(join2(dir, file), "utf8").split(/\r?\n/).forEach((text, i) => {
+    readFileSync3(join3(dir, file), "utf8").split(/\r?\n/).forEach((text, i) => {
       for (const m of text.matchAll(/secrets\.([A-Za-z_][A-Za-z0-9_]*)/g)) {
         if (m[1] === "GITHUB_TOKEN" || refs.has(m[1])) continue;
         refs.set(m[1], { name: m[1], file, line: i + 1 });
@@ -531,14 +880,14 @@ function ignoreMatcher(text) {
   return (file) => res.some((re) => re.test(file));
 }
 function loadIgnore(dir) {
-  const p = join2(dir, ".tripwireignore");
-  return ignoreMatcher(existsSync2(p) ? readFileSync2(p, "utf8") : "");
+  const p = join3(dir, ".tripwireignore");
+  return ignoreMatcher(existsSync3(p) ? readFileSync3(p, "utf8") : "");
 }
 function repoNameOf(target, dir) {
   return githubSlug(target)?.split("/")[1] ?? basename(resolve(dir));
 }
 async function currentBranch(dir) {
-  if (!existsSync2(join2(dir, ".git"))) return void 0;
+  if (!existsSync3(join3(dir, ".git"))) return void 0;
   return (await run("git", ["-C", dir, "rev-parse", "--abbrev-ref", "HEAD"])).stdout.trim();
 }
 
@@ -554,7 +903,7 @@ async function scanTarget(input, opts = {}, onStage) {
   onStage?.("cloning", {});
   try {
     if (remote) dir = await cloneRepo(target, history);
-    else if (!existsSync3(dir)) throw new Error(`No such directory: ${target}`);
+    else if (!existsSync4(dir)) throw new Error(`No such directory: ${target}`);
     const ignored = loadIgnore(dir);
     const files = (await listFiles(dir)).filter((f) => !ignored(f));
     const dirs = manifestDirs(files);
@@ -572,7 +921,11 @@ async function scanTarget(input, opts = {}, onStage) {
         warnings.push(`Could not diff against ${opts.diff} (${err.message.split("\n")[0]}); treating every secret in the code as blocking.`);
       }
     }
-    const { findings, samples } = mergeFindings(head, past.raws.filter((r) => !ignored(r.finding.file)), added);
+    const { findings, samples, values } = mergeFindings(head, past.raws.filter((r) => !ignored(r.finding.file)), added);
+    if (opts.verify) {
+      onStage?.("verify", { commitsScanned: past.commits, findings });
+      await verifyFindings(findings, values, honeyKeyIds()).catch((err) => warnings.push(`Key verification failed: ${err.message}`));
+    }
     const graph = buildGraph(name, findings, ciSecretRefs(dir, files), samples);
     onStage?.("vulns", { commitsScanned: past.commits, findings, ...graph });
     let vulns = [];
@@ -584,25 +937,7 @@ async function scanTarget(input, opts = {}, onStage) {
 }
 
 // server/cli/github.ts
-import { appendFileSync, readFileSync as readFileSync3 } from "node:fs";
-
-// server/github.ts
-var API = "https://api.github.com";
-async function gh(path, init = {}) {
-  const res = await fetch(`${API}${path}`, {
-    method: init.method ?? "GET",
-    headers: {
-      Authorization: `Bearer ${process.env.GITHUB_TOKEN}`,
-      Accept: "application/vnd.github+json",
-      "X-GitHub-Api-Version": "2022-11-28",
-      "Content-Type": "application/json"
-    },
-    body: init.body ? JSON.stringify(init.body) : void 0,
-    signal: AbortSignal.timeout(1e4)
-  });
-  if (!res.ok) throw new Error(`GitHub ${init.method ?? "GET"} ${path}: ${res.status}`);
-  return res.status === 204 ? void 0 : await res.json();
-}
+import { appendFileSync, readFileSync as readFileSync4 } from "node:fs";
 
 // server/graph.ts
 function blastHops(edges, startIds) {
@@ -630,11 +965,14 @@ function blastHops(edges, startIds) {
 var MARKER = "<!-- tripwire-report -->";
 var RANK2 = { UNKNOWN: 0, LOW: 1, MODERATE: 2, HIGH: 3, CRITICAL: 4 };
 function evaluate(r, policy) {
-  const candidates = r.diffBase ? r.findings.filter((f) => f.isNew) : r.findings.filter((f) => f.inHead);
+  const active = r.findings.filter((f) => f.verify?.status !== "revoked" && f.verify?.status !== "honey");
+  const candidates = r.diffBase ? active.filter((f) => f.isNew) : active.filter((f) => f.inHead);
   const blocking = policy.secrets ? candidates : [];
   const blockingVulns = policy.vulns === "none" ? [] : r.vulns.filter((v) => RANK2[v.severity] >= RANK2[policy.vulns]);
   const reasons = [];
   const s = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
+  const liveN = blocking.filter((f) => f.verify?.status === "live").length;
+  if (liveN) reasons.push(`${s(liveN, "live key")} confirmed by the provider`);
   if (blocking.length) reasons.push(r.diffBase ? `${s(blocking.length, "secret")} added in this change` : `${s(blocking.length, "secret")} in the code`);
   if (blockingVulns.length) reasons.push(`${s(blockingVulns.length, "vulnerable package")} at ${policy.vulns.toLowerCase()} or above`);
   return { failed: reasons.length > 0, reasons, blocking, blockingVulns };
@@ -643,7 +981,9 @@ function unlocks(r, f) {
   const byId = new Map(r.nodes.map((n) => [n.id, n]));
   return blastHops(r.edges, [f.nodeId]).flatMap((h) => h.nodes).map((id) => byId.get(id)).filter((n) => n?.type === "resource").map((n) => n.label);
 }
-var status = (f) => f.isNew ? "new" : f.inHead ? "in code" : "history";
+var VSTAT = { live: "**LIVE**", revoked: "revoked", honey: "honey", unverified: "unverified" };
+var status = (f) => [f.isNew ? "new" : f.inHead ? "in code" : "history", f.verify ? VSTAT[f.verify.status] : ""].filter(Boolean).join(" \xB7 ");
+var reach = (r, f) => f.verify?.access?.length ? f.verify.access.map((a) => a.label) : f.verify?.status === "revoked" || f.verify?.status === "honey" ? [] : unlocks(r, f);
 var order = (f) => f.isNew ? 0 : f.inHead ? 1 : 2;
 var sorted = (fs) => [...fs].sort((a, b) => order(a) - order(b));
 var cell = (s) => s.replace(/\|/g, "\\|").replace(/\n/g, " ");
@@ -654,7 +994,7 @@ function toMarkdown(r, v, maxVulns = 15) {
     out.push(`### Secrets (${r.findings.length})`, "", "| Status | Secret | Location | Type | Unlocks |", "| --- | --- | --- | --- | --- |");
     for (const f of sorted(r.findings)) {
       const where = f.inHead ? `\`${f.file}:${f.line}\`` : `\`${f.file}:${f.line}\` (commit ${f.commit})`;
-      out.push(`| ${status(f)} | \`${cell(f.variable ?? f.ruleLabel)}\` \`${cell(f.preview)}\` | ${where} | ${cell(f.ruleLabel)} | ${cell(unlocks(r, f).join(", ") || "-")} |`);
+      out.push(`| ${status(f)} | \`${cell(f.variable ?? f.ruleLabel)}\` \`${cell(f.preview)}\` | ${where} | ${cell(f.ruleLabel)} | ${cell(reach(r, f).join(", ") || "-")}${f.verify?.identity ? ` (as \`${cell(f.verify.identity)}\`)` : ""} |`);
     }
     out.push("");
     if (r.findings.some((f) => !f.inHead)) out.push("> Secrets marked `history` were deleted from the code but are still in git history. Rotate them with the provider; removing the line does not revoke them.", "");
@@ -674,14 +1014,16 @@ function toText(r, v, color, maxVulns = 10) {
   const c = (code) => (s) => color ? `\x1B[${code}m${s}\x1B[0m` : s;
   const [red, yellow, green, dim, bold, cyan] = ["31", "33", "32", "2", "1", "36"].map(c);
   const tone = (f) => f.isNew ? red("NEW ") : f.inHead ? red("CODE") : yellow("HIST");
+  const vtag = (f) => !f.verify ? "" : f.verify.status === "live" ? ` ${red(bold("LIVE"))}` : f.verify.status === "revoked" ? ` ${green("revoked")}` : f.verify.status === "honey" ? ` ${cyan("honey")}` : ` ${dim("unverified")}`;
   const sev = (s) => (RANK2[s] >= 3 ? red : RANK2[s] === 2 ? yellow : dim)(s.padEnd(8));
   const out = ["", `${bold("Tripwire")}  ${r.repo ?? r.name}${r.branch ? dim(` (${r.branch})`) : ""}  ${dim(`${r.filesScanned} files \xB7 ${r.commitsScanned} commits \xB7 ${(r.durationMs / 1e3).toFixed(1)}s`)}`, ""];
   out.push(bold(`Secrets (${r.findings.length})`));
   if (!r.findings.length) out.push(dim("  none found"));
   for (const f of sorted(r.findings)) {
-    out.push(`  ${tone(f)}  ${(f.variable ?? f.ruleLabel).padEnd(22)} ${cyan(`${f.file}:${f.line}`)}${f.inHead ? "" : dim(` @${f.commit}`)}  ${dim(f.ruleLabel)}`);
-    const u = unlocks(r, f);
-    out.push(dim(`        ${f.preview}${u.length ? `  \u2192 unlocks ${u.join(", ")}` : ""}`));
+    out.push(`  ${tone(f)}  ${(f.variable ?? f.ruleLabel).padEnd(22)} ${cyan(`${f.file}:${f.line}`)}${f.inHead ? "" : dim(` @${f.commit}`)}  ${dim(f.ruleLabel)}${vtag(f)}`);
+    const u = reach(r, f);
+    out.push(dim(`        ${f.preview}${f.verify?.identity ? `  as ${f.verify.identity}` : ""}${u.length ? `  \u2192 unlocks ${u.join(", ")}` : ""}`));
+    if (f.verify?.note && f.verify.status !== "live") out.push(dim(`        ${f.verify.note}`));
   }
   out.push("", bold(`Vulnerable dependencies (${r.vulns.length})`));
   if (!r.vulns.length) out.push(dim("  none found"));
@@ -716,7 +1058,7 @@ function pullRequestNumber() {
   const path = process.env.GITHUB_EVENT_PATH;
   if (!path) return void 0;
   try {
-    return JSON.parse(readFileSync3(path, "utf8")).pull_request?.number;
+    return JSON.parse(readFileSync4(path, "utf8")).pull_request?.number;
   } catch {
     return void 0;
   }
@@ -735,6 +1077,8 @@ async function upsertPrComment(body) {
 
 // server/cli/main.ts
 var HELP = `Usage: tripwire scan [path | git url | owner/repo] [options]
+       tripwire honey create [--email you@x.com] [--plant owner/repo] [--file path]
+       tripwire honey check      (exit 1 if any decoy was used)
 
 Finds secrets in the code and git history, maps what each one unlocks,
 and checks dependencies against OSV.dev. Exits 1 when something blocks.
@@ -745,6 +1089,7 @@ Options:
   --fail-on-vulns <sev>   Also fail on vulnerable deps: low|moderate|high|critical (default: none)
   --no-fail-secrets       Report secrets without failing
   --skip-vulns            Skip the dependency check
+  --verify                Ask each provider (read-only) if found keys work and what they reach
   --json <file|->         Write the full report as JSON
   --markdown <file>       Write a Markdown report
   --github                GitHub Actions: annotations, job summary, outputs
@@ -764,6 +1109,10 @@ async function main(argv, log = (s) => process.stdout.write(s), err = (s) => pro
       "fail-on-vulns": { type: "string", default: "none" },
       "no-fail-secrets": { type: "boolean" },
       "skip-vulns": { type: "boolean" },
+      verify: { type: "boolean" },
+      email: { type: "string" },
+      plant: { type: "string" },
+      file: { type: "string" },
       json: { type: "string" },
       markdown: { type: "string" },
       github: { type: "boolean" },
@@ -774,6 +1123,7 @@ async function main(argv, log = (s) => process.stdout.write(s), err = (s) => pro
   });
   const [cmd, target = "."] = positionals;
   if (values.help || !cmd) return log(HELP), 0;
+  if (cmd === "honey") return honey(positionals[1], values, log, err);
   if (cmd !== "scan") return err(`Unknown command "${cmd}".
 
 ${HELP}`), 2;
@@ -782,14 +1132,14 @@ ${HELP}`), 2;
 `), 2;
   const history = values.history === void 0 ? void 0 : Number(values.history);
   if (history !== void 0 && !(history >= 0)) return err("--history must be a number >= 0\n"), 2;
-  const report = await scanTarget(target, { history, diff: values.diff, vulns: !values["skip-vulns"] }, (stage) => !values.quiet && err(`tripwire: ${stage}\u2026
+  const report = await scanTarget(target, { history, diff: values.diff, vulns: !values["skip-vulns"], verify: !!values.verify }, (stage) => !values.quiet && err(`tripwire: ${stage}\u2026
 `));
   const verdict = evaluate(report, { secrets: !values["no-fail-secrets"], vulns: failVulns === "NONE" ? "none" : failVulns });
   const markdown = toMarkdown(report, verdict);
   if (values.json === "-") log(JSON.stringify(report, null, 2) + "\n");
   else log(toText(report, verdict, !!process.stdout.isTTY && !process.env.NO_COLOR));
-  if (values.json && values.json !== "-") writeFileSync(values.json, JSON.stringify(report, null, 2));
-  if (values.markdown) writeFileSync(values.markdown, markdown);
+  if (values.json && values.json !== "-") writeFileSync2(values.json, JSON.stringify(report, null, 2));
+  if (values.markdown) writeFileSync2(values.markdown, markdown);
   if (values.github) for (const line of githubReport(report, verdict, markdown)) log(line + "\n");
   if (values.comment) {
     const note = await upsertPrComment(markdown).catch((e) => `could not comment (${e.message})`);
@@ -797,6 +1147,38 @@ ${HELP}`), 2;
 `);
   }
   return verdict.failed ? 1 : 0;
+}
+async function honey(sub, values, log, err) {
+  if (sub === "create") {
+    const r = await createHoney({ memo: `Tripwire honey secret${values.plant ? ` for ${values.plant}` : ""}`, email: values.email, repo: values.plant });
+    log(`Created decoy AWS key ${r.accessKeyId} (stored in ${HONEY_FILE}).
+`);
+    if (values.plant) {
+      const planted = await plantHoney(r.id, values.plant, values.file);
+      log(`Planting PR: ${planted.prUrl}
+`);
+    } else log(`
+Paste this somewhere an attacker would look (.env, CI config, backups):
+
+${decoyFile(r)}
+`);
+    return 0;
+  }
+  if (sub === "check") {
+    const { records } = await checkHoney();
+    if (!records.length) return log("No honey secrets yet. Run `tripwire honey create` first.\n"), 0;
+    let used = 0;
+    for (const t of records.map(publicHoney)) {
+      log(`${t.accessKeyPreview}  ${t.repo ?? "unplanted"}${t.file ? `:${t.file}` : ""}  ${t.hits.length ? `USED ${t.hits.length}x` : "quiet"}${t.checkError ? `  (check failed: ${t.checkError})` : ""}
+`);
+      for (const h of t.hits.slice(0, 5)) log(`    ${new Date(h.at).toISOString()}  ${h.ip ?? "?"}  ${[h.location, h.org].filter(Boolean).join(" \xB7 ")}  ${h.action ?? ""}
+`);
+      used += t.hits.length;
+    }
+    return used ? 1 : 0;
+  }
+  return err(`Usage: tripwire honey create|check
+`), 2;
 }
 
 // server/cli/bin.ts

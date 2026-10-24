@@ -54,6 +54,19 @@ Exits `1` when something blocks, `0` when clean, `2` on usage errors. By default
 
 False positives: add `tripwire:ignore` (or `gitleaks:allow`) on the line, or globs to `.tripwireignore` (`fixtures/`, `*.test.ts`, `docs/**/*.md`).
 
+### Live keys and real reach (`--verify`)
+
+With `--verify` (CLI), `verify: true` (Action) or **Check if keys are live** (UI), Tripwire makes one read-only "who am I" call per key to its own provider: AWS STS + IAM, GitHub, Stripe, Slack, OpenAI, Anthropic, SendGrid and npm. Each secret is marked `live`, `revoked` or `unverified`. For live keys the graph shows what the provider says the key reaches (AWS account and IAM policies, GitHub repos it can write to, Stripe account, Slack workspace and scopes) instead of a guess from the variable name. Revoked keys and Tripwire's own decoys stop failing the check. Off by default because it uses the found key.
+
+### Honey secrets
+
+```bash
+npx github:X3PH1RE/tripwire honey create --email you@example.com --plant owner/repo   # opens a PR that plants the decoy
+npx github:X3PH1RE/tripwire honey check                                               # exits 1 if any decoy was used
+```
+
+A honey secret is a real AWS key from [Canarytokens](https://canarytokens.org) with no permissions. Any use of it (a scraper, a leaked clone, an insider) is reported with the source IP, location, client and the AWS call tried: by email, in `honey check`, and live in the UI's **Honey secrets** panel (the server polls every minute). `--plant` opens a PR adding the decoy, but GitHub push protection blocks AWS-format keys on most repos (public repos by default); then place the printed decoy yourself where GitHub doesn't scan (CI/CD variables, a server `.env`, an S3 backup, an internal wiki). Decoys are stored locally in `~/.tripwire/honey.json`; scans recognise them and never call AWS with them.
+
 ### GitHub Action
 
 Copy [examples/tripwire.yml](examples/tripwire.yml) to `.github/workflows/tripwire.yml`. On pull requests it fails only when the PR adds a secret, annotates the offending lines, and keeps one summary comment up to date with the secrets, what each unlocks, and vulnerable dependencies. On pushes it fails while any secret is in the code. Inputs: `path`, `fail-on-secrets`, `fail-on-vulns`, `comment`, `history`, `token`. Outputs: `secrets`, `new-secrets`, `vulns`, `failed`.

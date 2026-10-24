@@ -50,10 +50,11 @@ function ModeToggle({ mode, setMode }: { mode: Mode; setMode: (m: Mode) => void 
 function RealControls({ demo, onClear }: { demo: DemoState; onClear: () => void }) {
   const scan = demo.scan;
   const [target, setTarget] = useState(scan.target ?? "");
+  const [verify, setVerify] = useState(() => localStorage.getItem("tw-verify") === "1");
   const busy = !["idle", "done", "failed"].includes(scan.status);
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (target.trim()) post("/real/scan", { target: target.trim() });
+    if (target.trim()) post("/real/scan", { target: target.trim(), verify });
   };
   return (
     <form onSubmit={submit} className="flex flex-1 flex-wrap items-end gap-3">
@@ -66,7 +67,19 @@ function RealControls({ demo, onClear }: { demo: DemoState; onClear: () => void 
           {busy ? "Scanning…" : "Scan repository"}
         </Btn>
       </Group>
-      <p className="max-w-[420px] pb-2 text-[11px] leading-relaxed text-zinc-500">Clones the repo, scans files and the last 300 commits for secrets, maps what each one unlocks and checks dependencies against OSV.dev.</p>
+      <label className="flex cursor-pointer items-center gap-2 pb-2.5 text-[12px] text-zinc-300" title="Makes one read-only 'who am I' call per key to its provider (AWS, GitHub, Stripe, Slack, OpenAI, Anthropic, SendGrid, npm).">
+        <input
+          type="checkbox"
+          checked={verify}
+          onChange={(e) => {
+            setVerify(e.target.checked);
+            localStorage.setItem("tw-verify", e.target.checked ? "1" : "0");
+          }}
+          className="h-3.5 w-3.5 accent-rose-500"
+        />
+        Check if keys are live
+      </label>
+      <p className="max-w-[360px] pb-2 text-[11px] leading-relaxed text-zinc-500">Scans files and the last 300 commits, maps what each secret unlocks and checks dependencies against OSV.dev.</p>
       <div className="ml-auto">
         <Btn onClick={onClear} disabled={scan.status === "idle"}>
           Clear

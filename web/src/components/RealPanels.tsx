@@ -1,5 +1,6 @@
 import { motion } from "framer-motion";
-import type { Finding, RealScan, Severity, VulnPackage } from "../../../shared/types";
+import { useState } from "react";
+import type { DemoState, Finding, RealScan, Severity, VulnPackage } from "../../../shared/types";
 import { post } from "../api";
 import { Panel } from "./ui";
 import { fmt } from "./useNow";
@@ -12,21 +13,29 @@ const SEV: Record<Severity, string> = {
   UNKNOWN: "bg-zinc-500/10 text-zinc-400 ring-zinc-500/20",
 };
 
+const VERIFY: Record<string, string> = {
+  live: "bg-rose-500/20 text-rose-200 ring-rose-500/40",
+  revoked: "bg-emerald-500/10 text-emerald-300 ring-emerald-500/25",
+  honey: "bg-violet-500/10 text-violet-300 ring-violet-500/25",
+  unverified: "bg-zinc-500/10 text-zinc-400 ring-zinc-500/20",
+};
+
 const pill = "rounded-md px-1.5 py-0.5 font-mono text-[10px] font-medium ring-1 ring-inset";
 
 const STEPS: { key: RealScan["status"]; label: string }[] = [
   { key: "cloning", label: "Clone repository" },
   { key: "secrets", label: "Scan files for secrets" },
   { key: "history", label: "Scan git history" },
+  { key: "verify", label: "Check keys with providers" },
   { key: "vulns", label: "Check dependencies (OSV.dev)" },
 ];
-const ORDER = ["cloning", "secrets", "history", "vulns", "done"];
+const ORDER = ["cloning", "secrets", "history", "verify", "vulns", "done"];
 
 export function ScanPanel({ scan }: { scan: RealScan }) {
   const at = ORDER.indexOf(scan.status);
   const failedAt = scan.filesScanned ? 1 : 0;
   const detail = (k: RealScan["status"]) =>
-    k === "secrets" && scan.filesScanned ? `${scan.filesScanned} files` : k === "history" && scan.commitsScanned ? `${scan.commitsScanned} commits` : k === "vulns" && scan.status === "done" ? `${scan.vulns.length} vulnerable` : "";
+    k === "secrets" && scan.filesScanned ? `${scan.filesScanned} files` : k === "history" && scan.commitsScanned ? `${scan.commitsScanned} commits` : k === "vulns" && scan.status === "done" ? `${scan.vulns.length} vulnerable` : k === "verify" && at > 3 ? `${scan.findings.filter((f) => f.verify?.status === "live").length} live` : "";
   return (
     <Panel
       eyebrow="Repository scan"
@@ -35,7 +44,8 @@ export function ScanPanel({ scan }: { scan: RealScan }) {
       right={scan.finishedAt && scan.startedAt ? <span className="font-mono text-[11px] text-zinc-500">{fmt(scan.finishedAt - scan.startedAt)}</span> : undefined}
     >
       <ol className="mt-3 space-y-2">
-        {STEPS.map((s, i) => {
+        {STEPS.filter((s) => s.key !== "verify" || scan.verify).map((s) => {
+          const i = ORDER.indexOf(s.key);
           const done = scan.status === "done" || (at > i && scan.status !== "failed") || (scan.status === "failed" && i < failedAt);
           const active = scan.status === s.key;
           return (
@@ -67,7 +77,10 @@ function FindingRow({ f, onSelect }: { f: Finding; onSelect: (id: string) => voi
     >
       <div className="flex items-center justify-between gap-2">
         <span className="truncate font-mono text-[13px] font-medium text-zinc-100">{f.variable ?? f.ruleLabel}</span>
-        <span className={`${pill} shrink-0 ${f.inHead ? "bg-rose-500/10 text-rose-300 ring-rose-500/25" : "bg-amber-500/10 text-amber-300 ring-amber-500/25"}`}>{f.inHead ? "in code" : "history"}</span>
+        <span className="flex shrink-0 gap-1">
+          {f.verify && <span className={`${pill} ${VERIFY[f.verify.status]}`}>{f.verify.status}</span>}
+          <span className={`${pill} ${f.inHead ? "bg-rose-500/10 text-rose-300 ring-rose-500/25" : "bg-amber-500/10 text-amber-300 ring-amber-500/25"}`}>{f.inHead ? "in code" : "history"}</span>
+        </span>
       </div>
       <div className="mt-1 flex items-center justify-between gap-2 text-[11px] text-zinc-500">
         <span className="truncate font-mono">
@@ -76,6 +89,20 @@ function FindingRow({ f, onSelect }: { f: Finding; onSelect: (id: string) => voi
         <span className="shrink-0">{f.ruleLabel}</span>
       </div>
       <div className="mt-1.5 truncate font-mono text-[11px] text-zinc-400">{f.preview}</div>
+      {f.verify?.status === "live" && (
+        <div className="mt-2 rounded-md border border-rose-500/20 bg-rose-500/5 px-2 py-1.5 text-[11px] leading-relaxed text-rose-100/90">
+          <div>
+            Works right now as <span className="font-mono">{f.verify.identity}</span>
+          </div>
+          {f.verify.access?.map((a) => (
+            <div key={a.label} className="text-rose-200/70">
+              → {a.label}
+              {a.detail ? <span className="text-zinc-500"> · {a.detail}</span> : null}
+            </div>
+          ))}
+        </div>
+      )}
+      {f.verify && f.verify.status !== "live" && f.verify.note && <div className="mt-1.5 text-[11px] text-zinc-500">{f.verify.note}</div>}
       {!f.inHead && <div className="mt-1.5 text-[11px] leading-relaxed text-amber-200/80">Deleted from the code but still in commit {f.commit}. Anyone who clones the repo has it. Rotate it.</div>}
     </button>
   );
@@ -169,6 +196,81 @@ export function VulnPanel({ scan }: { scan: RealScan }) {
             <VulnRow key={v.key} v={v} />
           ))}
           {scan.vulns.length > 8 && <div className="text-center text-[12px] text-zinc-500">+{scan.vulns.length - 8} more</div>}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+export function HoneyPanel({ demo }: { demo: DemoState }) {
+  const [email, setEmail] = useState(() => localStorage.getItem("tw-honey-email") ?? "");
+  const [error, setError] = useState("");
+  const repo = demo.scan.repo;
+  const tokens = demo.honeyTokens;
+  const used = tokens.reduce((n, t) => n + t.hits.length, 0);
+  const send = async (path: string, body?: unknown) => {
+    setError("");
+    const res = await fetch(`/api${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body ?? {}) });
+    if (!res.ok) setError(((await res.json().catch(() => ({}))) as { error?: string }).error ?? `HTTP ${res.status}`);
+  };
+  return (
+    <Panel
+      eyebrow="Honey secrets"
+      accent={used ? "bg-rose-500 animate-pulse" : tokens.length ? "bg-violet-400" : "bg-zinc-600"}
+      title={used ? `Decoy used ${used} time${used === 1 ? "" : "s"}` : tokens.length ? `${tokens.length} decoy${tokens.length === 1 ? "" : "s"} armed` : "Plant a real decoy key"}
+    >
+      <p className="mt-1 text-[12px] leading-relaxed text-zinc-400">A real AWS key from Canarytokens with no permissions. Anyone who tries it is reported here and by email.</p>
+      <div className="mt-3 flex gap-2">
+        <input
+          value={email}
+          onChange={(e) => {
+            setEmail(e.target.value);
+            localStorage.setItem("tw-honey-email", e.target.value);
+          }}
+          placeholder="alert email"
+          className="h-9 min-w-0 flex-1 rounded-lg border border-line bg-ink-850 px-3 font-mono text-[12px] text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-line-strong"
+        />
+        <button
+          disabled={!!demo.honeyBusy}
+          onClick={() => send("/real/honey", { email: email || undefined, repo, plant: !!repo })}
+          className="h-9 shrink-0 rounded-lg bg-zinc-100 px-3 text-[12px] font-medium text-zinc-900 transition hover:bg-white disabled:opacity-40"
+        >
+          {demo.honeyBusy ?? (repo ? `Plant in ${repo.split("/")[1]}` : "Create decoy")}
+        </button>
+      </div>
+      {error && <div className="mt-2 rounded-lg border border-rose-500/20 bg-rose-500/5 px-3 py-2 text-[12px] text-rose-200/90">{error}</div>}
+      {tokens.length > 0 && (
+        <div className="mt-3 flex flex-col gap-2">
+          {tokens.map((t) => (
+            <div key={t.id} className={`rounded-lg border p-3 ${t.hits.length ? "border-rose-500/30 bg-rose-500/5" : "border-line bg-ink-850"}`}>
+              <div className="flex items-center justify-between gap-2">
+                <span className="truncate font-mono text-[12px] text-zinc-100">{t.accessKeyPreview}</span>
+                <span className={`${pill} shrink-0 ${t.hits.length ? VERIFY.live : VERIFY.honey}`}>{t.hits.length ? `used ${t.hits.length}x` : "quiet"}</span>
+              </div>
+              <div className="mt-1 flex items-center justify-between gap-2 text-[11px] text-zinc-500">
+                <span className="truncate">{t.repo ? `${t.repo}${t.file ? `:${t.file}` : ""}` : "not planted"}</span>
+                {t.prUrl && (
+                  <a href={t.prUrl} target="_blank" rel="noreferrer" className="shrink-0 text-violet-300 hover:text-violet-200">
+                    planting PR ↗
+                  </a>
+                )}
+              </div>
+              {t.snippet && !t.hits.length && (
+                <details className="mt-1.5 text-[11px] text-zinc-500">
+                  <summary className="cursor-pointer hover:text-zinc-300">Show decoy to place by hand</summary>
+                  <pre className="mt-1 overflow-x-auto rounded bg-ink-950 p-2 font-mono text-[10px] text-zinc-300">{t.snippet}</pre>
+                </details>
+              )}
+              {t.hits.slice(0, 3).map((h) => (
+                <div key={h.at} className="mt-1.5 font-mono text-[11px] text-rose-200/80">
+                  {new Date(h.at).toLocaleString()} · {h.ip ?? "?"} {h.location ? `· ${h.location}` : ""} {h.action ? `· ${h.action}` : ""}
+                </div>
+              ))}
+            </div>
+          ))}
+          <button onClick={() => send("/real/honey/check")} disabled={!!demo.honeyBusy} className="text-[11px] text-zinc-500 hover:text-zinc-300 disabled:opacity-40">
+            Checked {tokens[0].lastCheck ? new Date(tokens[0].lastCheck).toLocaleTimeString() : "never"} · check now
+          </button>
         </div>
       )}
     </Panel>

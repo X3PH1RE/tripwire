@@ -96,6 +96,8 @@ export interface DemoState {
   };
   cve: CveState;
   scan: RealScan;
+  honeyTokens: HoneyToken[];
+  honeyBusy?: string;
 }
 
 export interface BlastResult {
@@ -122,6 +124,50 @@ export interface Finding {
   preview: string;
   service: string;
   nodeId: string;
+  /** Result of asking the provider whether the key works (`--verify`). */
+  verify?: Verification;
+}
+
+export interface Access {
+  label: string;
+  sensitivity: NonNullable<GraphNode["sensitivity"]>;
+  detail?: string;
+}
+
+export interface Verification {
+  status: "live" | "revoked" | "unverified" | "honey";
+  /** Who the key authenticates as, e.g. an AWS ARN or GitHub login. */
+  identity?: string;
+  note?: string;
+  /** What the provider says the key can reach. */
+  access?: Access[];
+}
+
+export interface HoneyHit {
+  at: number;
+  ip?: string;
+  location?: string;
+  org?: string;
+  userAgent?: string;
+  /** AWS API call or service the attacker tried. */
+  action?: string;
+}
+
+/** A real decoy credential (Canarytokens AWS key). Safe to expose to the UI: no secret or auth token. */
+export interface HoneyToken {
+  id: string;
+  accessKeyPreview: string;
+  memo: string;
+  createdAt: number;
+  repo?: string;
+  file?: string;
+  prUrl?: string;
+  historyUrl: string;
+  /** Decoy env lines to place by hand when it was not planted through a PR. A decoy unlocks nothing. */
+  snippet?: string;
+  lastCheck?: number;
+  checkError?: string;
+  hits: HoneyHit[];
 }
 
 export type Severity = "CRITICAL" | "HIGH" | "MODERATE" | "LOW" | "UNKNOWN";
@@ -148,7 +194,8 @@ export interface RealFix {
 }
 
 export interface RealScan {
-  status: "idle" | "cloning" | "secrets" | "history" | "vulns" | "done" | "failed";
+  status: "idle" | "cloning" | "secrets" | "history" | "verify" | "vulns" | "done" | "failed";
+  verify?: boolean;
   target?: string;
   repo?: string;
   branch?: string;

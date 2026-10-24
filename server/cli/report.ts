@@ -19,11 +19,14 @@ export interface Verdict {
 
 /** In diff mode only secrets the change adds block; otherwise every secret still in the code does. */
 export function evaluate(r: ScanReport, policy: Policy): Verdict {
-  const candidates = r.diffBase ? r.findings.filter((f) => f.isNew) : r.findings.filter((f) => f.inHead);
+  const active = r.findings.filter((f) => f.verify?.status !== "revoked" && f.verify?.status !== "honey");
+  const candidates = r.diffBase ? active.filter((f) => f.isNew) : active.filter((f) => f.inHead);
   const blocking = policy.secrets ? candidates : [];
   const blockingVulns = policy.vulns === "none" ? [] : r.vulns.filter((v) => RANK[v.severity] >= RANK[policy.vulns as Severity]);
   const reasons: string[] = [];
   const s = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
+  const liveN = blocking.filter((f) => f.verify?.status === "live").length;
+  if (liveN) reasons.push(`${s(liveN, "live key")} confirmed by the provider`);
   if (blocking.length) reasons.push(r.diffBase ? `${s(blocking.length, "secret")} added in this change` : `${s(blocking.length, "secret")} in the code`);
   if (blockingVulns.length) reasons.push(`${s(blockingVulns.length, "vulnerable package")} at ${(policy.vulns as string).toLowerCase()} or above`);
   return { failed: reasons.length > 0, reasons, blocking, blockingVulns };
@@ -38,7 +41,9 @@ export function unlocks(r: ScanReport, f: Finding): string[] {
     .map((n) => n!.label);
 }
 
-const status = (f: Finding) => (f.isNew ? "new" : f.inHead ? "in code" : "history");
+const VSTAT: Record<string, string> = { live: "**LIVE**", revoked: "revoked", honey: "honey", unverified: "unverified" };
+const status = (f: Finding) => [f.isNew ? "new" : f.inHead ? "in code" : "history", f.verify ? VSTAT[f.verify.status] : ""].filter(Boolean).join(" · ");
+const reach = (r: ScanReport, f: Finding) => (f.verify?.access?.length ? f.verify.access.map((a) => a.label) : f.verify?.status === "revoked" || f.verify?.status === "honey" ? [] : unlocks(r, f));
 const order = (f: Finding) => (f.isNew ? 0 : f.inHead ? 1 : 2);
 const sorted = (fs: Finding[]) => [...fs].sort((a, b) => order(a) - order(b));
 const cell = (s: string) => s.replace(/\|/g, "\\|").replace(/\n/g, " ");
@@ -50,7 +55,7 @@ export function toMarkdown(r: ScanReport, v: Verdict, maxVulns = 15): string {
     out.push(`### Secrets (${r.findings.length})`, "", "| Status | Secret | Location | Type | Unlocks |", "| --- | --- | --- | --- | --- |");
     for (const f of sorted(r.findings)) {
       const where = f.inHead ? `\`${f.file}:${f.line}\`` : `\`${f.file}:${f.line}\` (commit ${f.commit})`;
-      out.push(`| ${status(f)} | \`${cell(f.variable ?? f.ruleLabel)}\` \`${cell(f.preview)}\` | ${where} | ${cell(f.ruleLabel)} | ${cell(unlocks(r, f).join(", ") || "-")} |`);
+      out.push(`| ${status(f)} | \`${cell(f.variable ?? f.ruleLabel)}\` \`${cell(f.preview)}\` | ${where} | ${cell(f.ruleLabel)} | ${cell(reach(r, f).join(", ") || "-")}${f.verify?.identity ? ` (as \`${cell(f.verify.identity)}\`)` : ""} |`);
     }
     out.push("");
     if (r.findings.some((f) => !f.inHead)) out.push("> Secrets marked `history` were deleted from the code but are still in git history. Rotate them with the provider; removing the line does not revoke them.", "");
@@ -71,14 +76,16 @@ export function toText(r: ScanReport, v: Verdict, color: boolean, maxVulns = 10)
   const c = (code: string) => (s: string) => (color ? `\x1b[${code}m${s}\x1b[0m` : s);
   const [red, yellow, green, dim, bold, cyan] = ["31", "33", "32", "2", "1", "36"].map(c);
   const tone = (f: Finding) => (f.isNew ? red("NEW ") : f.inHead ? red("CODE") : yellow("HIST"));
+  const vtag = (f: Finding) => (!f.verify ? "" : f.verify.status === "live" ? ` ${red(bold("LIVE"))}` : f.verify.status === "revoked" ? ` ${green("revoked")}` : f.verify.status === "honey" ? ` ${cyan("honey")}` : ` ${dim("unverified")}`);
   const sev = (s: Severity) => (RANK[s] >= 3 ? red : RANK[s] === 2 ? yellow : dim)(s.padEnd(8));
   const out = ["", `${bold("Tripwire")}  ${r.repo ?? r.name}${r.branch ? dim(` (${r.branch})`) : ""}  ${dim(`${r.filesScanned} files · ${r.commitsScanned} commits · ${(r.durationMs / 1000).toFixed(1)}s`)}`, ""];
   out.push(bold(`Secrets (${r.findings.length})`));
   if (!r.findings.length) out.push(dim("  none found"));
   for (const f of sorted(r.findings)) {
-    out.push(`  ${tone(f)}  ${(f.variable ?? f.ruleLabel).padEnd(22)} ${cyan(`${f.file}:${f.line}`)}${f.inHead ? "" : dim(` @${f.commit}`)}  ${dim(f.ruleLabel)}`);
-    const u = unlocks(r, f);
-    out.push(dim(`        ${f.preview}${u.length ? `  → unlocks ${u.join(", ")}` : ""}`));
+    out.push(`  ${tone(f)}  ${(f.variable ?? f.ruleLabel).padEnd(22)} ${cyan(`${f.file}:${f.line}`)}${f.inHead ? "" : dim(` @${f.commit}`)}  ${dim(f.ruleLabel)}${vtag(f)}`);
+    const u = reach(r, f);
+    out.push(dim(`        ${f.preview}${f.verify?.identity ? `  as ${f.verify.identity}` : ""}${u.length ? `  → unlocks ${u.join(", ")}` : ""}`));
+    if (f.verify?.note && f.verify.status !== "live") out.push(dim(`        ${f.verify.note}`));
   }
   out.push("", bold(`Vulnerable dependencies (${r.vulns.length})`));
   if (!r.vulns.length) out.push(dim("  none found"));

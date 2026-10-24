@@ -4,7 +4,7 @@ import { AlertFeed } from "./components/AlertFeed";
 import { BlastPanel } from "./components/BlastPanel";
 import { ContainPanel } from "./components/ContainPanel";
 import { ControlBar } from "./components/ControlBar";
-import { FindingsPanel, ScanPanel, VulnPanel } from "./components/RealPanels";
+import { FindingsPanel, HoneyPanel, ScanPanel, VulnPanel } from "./components/RealPanels";
 import { Graph } from "./components/Graph";
 import { Timeline } from "./components/Timeline";
 import { useStore } from "./state/store";
@@ -19,6 +19,7 @@ const LEGEND = [
 const REAL_LEGEND = [
   ["bg-rose-500", "Exposed secret / reachable resource"],
   ["bg-amber-400", "history = deleted but still in git"],
+  ["bg-violet-400", "live / revoked / honey = checked with provider"],
   ["bg-zinc-600", "CI secret reachable through repo access"],
 ];
 
@@ -128,13 +129,13 @@ export default function App() {
         <aside className="scroll-thin flex w-[420px] shrink-0 flex-col gap-3 overflow-y-auto border-l border-line bg-ink-950 p-4">
           {blast && <BlastPanel blast={blast} nodes={graph.nodes} onClose={clearBlast} />}
           {real ? (
-            scan.status !== "idle" && (
-              <>
-                <ScanPanel scan={scan} />
-                {scan.nodes.length > 0 || scan.status === "done" || scan.status === "vulns" ? <FindingsPanel scan={scan} onSelect={showBlast} /> : null}
-                {scan.status === "done" && <VulnPanel scan={scan} />}
-              </>
-            )
+            <>
+              {scan.status !== "idle" && <ScanPanel scan={scan} />}
+              {scan.nodes.length > 0 || scan.status === "done" || scan.status === "vulns" ? <FindingsPanel scan={scan} onSelect={showBlast} /> : null}
+              <HoneyPanel demo={demo} />
+              {scan.status === "done" && <VulnPanel scan={scan} />}
+              {demo.incidents.some((i) => i.kind === "honey") && <AlertFeed incidents={demo.incidents.filter((i) => i.kind === "honey")} />}
+            </>
           ) : (
             <>
               <Timeline cve={demo.cve} />

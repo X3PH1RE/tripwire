@@ -15,7 +15,10 @@ export async function gh<T = any>(path: string, init: { method?: string; body?: 
     body: init.body ? JSON.stringify(init.body) : undefined,
     signal: AbortSignal.timeout(10_000),
   });
-  if (!res.ok) throw new Error(`GitHub ${init.method ?? "GET"} ${path}: ${res.status}`);
+  if (!res.ok) {
+    const msg = ((await res.json().catch(() => ({}))) as { message?: string }).message;
+    throw new Error(`GitHub ${init.method ?? "GET"} ${path}: ${res.status}${msg ? ` ${msg}` : ""}`);
+  }
   return (res.status === 204 ? undefined : await res.json()) as T;
 }
 

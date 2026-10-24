@@ -86,3 +86,39 @@ test("cli argument errors exit 2", async () => {
   assert.equal(await main(["scan", ".", "--fail-on-vulns", "bad"], quiet, quiet), 2);
   assert.equal(await main(["--help"], quiet, quiet), 0);
 });
+
+test("sigV4 matches the AWS reference signature", async () => {
+  const { sigV4 } = await import("../real/verify");
+  const h = sigV4({ id: "AKIDEXAMPLE", secret: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY", service: "sts", host: "sts.amazonaws.com", region: "us-east-1", body: "Action=GetCallerIdentity&Version=2011-06-15", now: new Date("2015-08-30T12:36:00Z") });
+  assert.equal(h["X-Amz-Date"], "20150830T123600Z");
+  assert.match(h.Authorization, /^AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE\/20150830\/us-east-1\/sts\/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature=[0-9a-f]{64}$/);
+});
+
+test("verified keys reshape the graph and the verdict", async () => {
+  const { buildGraph } = await import("../real/graph");
+  const base = { rule: "x", ruleLabel: "x", file: "a.env", line: 1, inHead: true, preview: "p", service: "api", nodeId: "" };
+  const findings = [
+    { ...base, id: "f-0", provider: "github", variable: "GH", verify: { status: "live" as const, identity: "octo", access: [{ label: "Write access to 3 repos", sensitivity: "production" as const }] } },
+    { ...base, id: "f-1", provider: "stripe", variable: "STRIPE", verify: { status: "revoked" as const } },
+    { ...base, id: "f-2", provider: "aws", variable: "AWS", verify: { status: "honey" as const } },
+  ];
+  const g = buildGraph("repo", findings, [], new Map());
+  const labels = g.nodes.filter((n) => n.type === "resource").map((n) => n.label);
+  assert.deepEqual(labels, ["Write access to 3 repos"]);
+  assert.equal(g.nodes.find((n) => n.label === "AWS")?.type, "decoy");
+  assert.equal(g.nodes.find((n) => n.label === "STRIPE")?.badge, "revoked");
+  const report = { findings, nodes: g.nodes, edges: g.edges, vulns: [], warnings: [], target: ".", name: "repo", filesScanned: 1, commitsScanned: 0, durationMs: 1 };
+  const v = evaluate(report, { secrets: true, vulns: "none" });
+  assert.deepEqual(v.blocking.map((f) => f.id), ["f-0"]);
+  assert.match(v.reasons[0], /1 live key/);
+});
+
+test("canarytokens hits are parsed newest first", async () => {
+  const { parseHits } = await import("../real/honey");
+  const hits = parseHits([
+    { time_of_hit: 1700000000.5, src_ip: "1.2.3.4", geo_info: { city: "Kochi", country: "IN", org: "AS1 Example" }, useragent: "aws-cli/2", additional_info: { aws_key_log_data: { eventName: ["ListBuckets"] } } },
+    { time_of_hit: 1700000100, src_ip: "", geo_info: "" },
+  ]);
+  assert.equal(hits[0].at, 1700000100000);
+  assert.deepEqual(hits[1], { at: 1700000000500, ip: "1.2.3.4", location: "Kochi, IN", org: "AS1 Example", userAgent: "aws-cli/2", action: "ListBuckets" });
+});

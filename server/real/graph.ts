@@ -111,13 +111,21 @@ export function buildGraph(repoName: string, findings: Finding[], ciRefs: CiSecr
     }
     const serviceId = `r-svc-${slug(f.service)}`;
     add({ id: serviceId, type: "service", label: f.service, version: f.service === "CI (GitHub Actions)" ? "workflows" : undefined, status: "ok", position: { x: COL.service, y: 0 } });
-    const node = add({ id, type: "secret", label: name, file: f.file, line: f.line, provider: f.provider, status: "exposed", badge: f.inHead ? undefined : "history", position: { x: COL.secret, y: 0 } });
+    const v = f.verify?.status;
+    const badge = v === "live" ? "live" : v === "revoked" ? "revoked" : v === "honey" ? "honey" : f.inHead ? undefined : "history";
+    const node = add({ id, type: v === "honey" ? "decoy" : "secret", label: name, file: f.file, line: f.line, provider: f.provider, status: v === "revoked" ? "rotated" : "exposed", badge, position: { x: COL.secret, y: 0 } });
     secretRows.push({ want: row++ * ROW, node });
     link(serviceId, id, "stored_in");
-    const r = resourceFor(f.provider, f.variable, samples.get(f.id));
-    const rid = `r-res-${slug(r.key)}`;
-    add({ id: rid, type: "resource", label: r.label, sensitivity: r.sensitivity, provider: r.provider, status: "exposed", position: { x: COL.resource, y: 0 } });
-    link(id, rid, "unlocks");
+    // A revoked key or a decoy unlocks nothing; a verified key unlocks what the provider reported.
+    if (v === "revoked" || v === "honey") continue;
+    const reach = f.verify?.access?.length
+      ? f.verify.access.map((a) => ({ key: `v-${f.provider}-${a.label}`, label: a.label, sensitivity: a.sensitivity, provider: f.provider }))
+      : [resourceFor(f.provider, f.variable, samples.get(f.id))];
+    for (const r of reach.slice(0, 6)) {
+      const rid = `r-res-${slug(r.key)}`;
+      add({ id: rid, type: "resource", label: r.label, sensitivity: r.sensitivity, provider: r.provider, status: "exposed", position: { x: COL.resource, y: 0 } });
+      link(id, rid, "unlocks");
+    }
   }
   settle(secretRows);
 

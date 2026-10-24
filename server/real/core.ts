@@ -2,10 +2,12 @@ import { existsSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Finding, GraphEdge, GraphNode, VulnPackage } from "../../shared/types";
 import { buildGraph } from "./graph";
+import { honeyKeyIds } from "./honey";
 import { findVulns, parseDeps } from "./osv";
+import { verifyFindings } from "./verify";
 import { ciSecretRefs, cloneRepo, currentBranch, githubSlug, listFiles, loadIgnore, manifestDirs, mergeFindings, normalizeTarget, repoNameOf, scanDiff, scanHead, scanHistory } from "./scan";
 
-export type Stage = "cloning" | "secrets" | "history" | "vulns";
+export type Stage = "cloning" | "secrets" | "history" | "verify" | "vulns";
 
 export interface ScanOptions {
   /** Commits of history to scan (0 = none). */
@@ -13,6 +15,8 @@ export interface ScanOptions {
   /** Base ref/SHA: findings added between it and HEAD are flagged `isNew`. */
   diff?: string;
   vulns?: boolean;
+  /** Ask each provider whether found keys still work and what they can reach. */
+  verify?: boolean;
 }
 
 export interface ScanReport {
@@ -62,7 +66,11 @@ export async function scanTarget(input: string, opts: ScanOptions = {}, onStage?
         warnings.push(`Could not diff against ${opts.diff} (${(err as Error).message.split("\n")[0]}); treating every secret in the code as blocking.`);
       }
     }
-    const { findings, samples } = mergeFindings(head, past.raws.filter((r) => !ignored(r.finding.file)), added);
+    const { findings, samples, values } = mergeFindings(head, past.raws.filter((r) => !ignored(r.finding.file)), added);
+    if (opts.verify) {
+      onStage?.("verify", { commitsScanned: past.commits, findings });
+      await verifyFindings(findings, values, honeyKeyIds()).catch((err: Error) => warnings.push(`Key verification failed: ${err.message}`));
+    }
     const graph = buildGraph(name, findings, ciSecretRefs(dir, files), samples);
     onStage?.("vulns", { commitsScanned: past.commits, findings, ...graph });
     let vulns: VulnPackage[] = [];

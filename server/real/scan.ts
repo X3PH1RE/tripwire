@@ -176,7 +176,7 @@ export async function scanDiff(dir: string, dirs: Set<string>, repoName: string,
 }
 
 /** Merges HEAD and history hits: one finding per distinct secret value; history-only ones are flagged. */
-export function mergeFindings(head: Raw[], history: Raw[], added?: Set<string>): { findings: Finding[]; samples: Map<string, string> } {
+export function mergeFindings(head: Raw[], history: Raw[], added?: Set<string>): { findings: Finding[]; samples: Map<string, string>; values: Map<string, string> } {
   const byValue = new Map<string, Raw>();
   for (const r of head) if (!byValue.has(r.value)) byValue.set(r.value, r);
   for (const r of history) {
@@ -185,13 +185,15 @@ export function mergeFindings(head: Raw[], history: Raw[], added?: Set<string>):
     else byValue.set(r.value, r);
   }
   const samples = new Map<string, string>();
+  const values = new Map<string, string>();
   const findings = [...byValue.values()].map((r, i) => {
     r.finding.id = `f-${i}`;
     if (added) r.finding.isNew = added.has(r.value);
     if (r.finding.rule === "db-url") samples.set(r.finding.id, r.value);
+    values.set(r.finding.id, r.value);
     return r.finding;
   });
-  return { findings, samples };
+  return { findings, samples, values };
 }
 
 export function ciSecretRefs(dir: string, files: string[]): CiSecretRef[] {

@@ -34,6 +34,13 @@ function subtitle(n: GraphNode): string {
 
 const hidden = { opacity: 0, width: 6, height: 6 };
 
+const BADGE: Record<string, string> = {
+  history: "bg-amber-500/10 text-amber-300 ring-amber-500/25",
+  live: "bg-rose-500/20 text-rose-200 ring-rose-500/40",
+  revoked: "bg-emerald-500/10 text-emerald-300 ring-emerald-500/25",
+  honey: "bg-violet-500/10 text-violet-300 ring-violet-500/25",
+};
+
 export function TripNode({ data }: NodeProps<TripFlowNode>) {
   const { node: n, lit, selected, secured } = data;
   const clickable = n.type === "secret";
@@ -70,7 +77,7 @@ export function TripNode({ data }: NodeProps<TripFlowNode>) {
           </motion.span>
         )}
         {n.badge && (
-          <span className={`rounded-md px-1.5 py-0.5 font-mono text-[11px] ring-1 ring-inset ${n.badge === "history" ? "bg-amber-500/10 text-amber-300 ring-amber-500/25" : "bg-emerald-500/10 text-emerald-300 ring-emerald-500/25"}`}>{n.badge}</span>
+          <span className={`rounded-md px-1.5 py-0.5 font-mono text-[11px] ring-1 ring-inset ${BADGE[n.badge] ?? "bg-emerald-500/10 text-emerald-300 ring-emerald-500/25"}`}>{n.badge}</span>
         )}
       </div>
       <div className={`flex items-center gap-1.5 truncate font-semibold tracking-tight text-zinc-50 ${n.type === "decoy" ? "text-[13px]" : "mt-1 text-[14px]"}`}>
