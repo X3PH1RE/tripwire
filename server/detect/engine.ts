@@ -30,6 +30,8 @@ export interface Hit {
 }
 
 const MAX_LINE = 2000;
+/** Windows over a very long line overlap by this much, so no token up to this long is cut in half. */
+const LONG_OVERLAP = 400;
 const MAX_PER_RULE_PER_LINE = 10;
 
 // A name ending in KEY/TOKEN/..., or one of the unambiguous bare names (`password: ...`, `secret = ...`).
@@ -137,7 +139,11 @@ export class Engine {
     // Decoded text can contain keywords the file as a whole did not, so decoding tests against every rule that applies to this path.
     const decodeRules = forPath.filter((r) => !r.def.multiline);
     const perLine = this.candidates(lowerAll, lines.length, matching);
-    for (let i = 0; i < lines.length; i++) out.push(...this.scanLine(lines[i], path, startLine + i, perLine[i] ?? NO_RULES, decodeRules));
+    for (let i = 0; i < lines.length; i++) {
+      const text = lines[i];
+      if (text.length <= MAX_LINE) out.push(...this.scanLine(text, path, startLine + i, perLine[i] ?? NO_RULES, decodeRules));
+      else out.push(...this.scanLong(text, path, startLine + i, perLine[i] ?? NO_RULES, decodeRules));
+    }
 
     const multi = forPath.filter((r) => r.def.multiline && (!r.keywords.length || r.keywords.some((k) => lowerAll.includes(k))));
     if (multi.length) {
@@ -191,8 +197,38 @@ export class Engine {
     return perLine;
   }
 
+  /**
+   * Minified bundles, source maps and one-line JSON are a single huge line. Skipping them would let a secret hide in
+   * `app.min.js`, so they are scanned in overlapping windows. The name-based generic rule is off here: in minified code
+   * every `a="..."` looks like an assignment.
+   */
+  private scanLong(text: string, path: string | undefined, line: number, rules: CompiledRule[], decodeRules: CompiledRule[]): Hit[] {
+    const seen = new Set<string>();
+    const out: Hit[] = [];
+    // `rules` is every rule whose keyword is somewhere in this huge line. Per window only the few whose keyword is in
+    // that window need to run; picking them with the same single-pass index keeps a 500 KB bundle linear.
+    const eligible = new Set(rules);
+    const always = this.always.filter((r) => eligible.has(r));
+    for (let at = 0; at < text.length; at += MAX_LINE - LONG_OVERLAP) {
+      const window = text.slice(at, at + MAX_LINE);
+      const picked = new Map<number, CompiledRule>(always.map((r) => [r.index, r]));
+      this.keywordIndex.scan(window.toLowerCase(), (keyword) => {
+        for (const r of this.keywordRules[keyword]) if (eligible.has(r)) picked.set(r.index, r);
+      });
+      const inWindow = [...picked.values()].sort((a, b) => a.index - b.index);
+      for (const h of this.scanLine(window, path, line, inWindow, decodeRules, undefined, false)) {
+        const key = `${h.rule.id}\0${h.value}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(h);
+      }
+      if (at + MAX_LINE >= text.length) break;
+    }
+    return out;
+  }
+
   /** `via` is set when `text` came out of a decoder; those lines were not pre-filtered by keyword, so they are checked here. */
-  private scanLine(text: string, path: string | undefined, line: number, rules: CompiledRule[], decodeRules: CompiledRule[], via?: string): Hit[] {
+  private scanLine(text: string, path: string | undefined, line: number, rules: CompiledRule[], decodeRules: CompiledRule[], via?: string, allowGeneric = true): Hit[] {
     // Most lines in a repo have no candidate rule and no long token, so this path must stay allocation-free.
     if (text.length > MAX_LINE || text.length < MIN_LINE) return NO_HITS;
     let assign: RegExpMatchArray | null | undefined;
@@ -220,7 +256,7 @@ export class Engine {
       const resolved = resolve(hits);
       if (resolved.length) return via ? resolved.map((h) => (h.via ? h : { ...h, via })) : resolved;
     }
-    const generic = this.generic(text, path, line, getAssign());
+    const generic = allowGeneric ? this.generic(text, path, line, getAssign()) : undefined;
     return generic ? [{ ...generic, via }] : NO_HITS;
   }
 

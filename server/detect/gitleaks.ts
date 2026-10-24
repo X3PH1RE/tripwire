@@ -120,7 +120,8 @@ const allowlist = (a: TomlAllowlist): AllowlistDef => ({
   regexTarget: a.regexTarget,
   regexes: a.regexes?.map(translateGoRegex),
   stopwords: a.stopwords,
-  paths: a.paths?.map(translateGoRegex),
+  // SVG is plain text and can carry a key; Gitleaks skips it by default, which makes it a hiding place.
+  paths: a.paths?.map((p) => translateGoRegex(p.replace("|svg|", "|"))),
 });
 
 export function importGitleaks(toml: string): Pack {

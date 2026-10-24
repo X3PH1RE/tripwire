@@ -7,7 +7,7 @@ export const tripwirePack: Pack = {
   source: "tripwire",
   rules: [
     // Only a complete BEGIN..END block counts; a bare header in docs or a truncated example does not.
-    rule({ id: "private-key", label: "Private key", provider: "ssh", multiline: true, regex: "-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----[\\w+/=:,.\\s-]{40,}?-----END (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----", keywords: ["private key"] }),
+    rule({ id: "private-key", label: "Private key", provider: "ssh", multiline: true, regex: "-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----(?:(?!-----BEGIN)[\\w+/=:,.\\s-]){40,16000}?-----END (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----", keywords: ["private key"] }),
     rule({ id: "aws-access-key", label: "AWS access key ID", provider: "aws", regex: "\\b((?:AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16})\\b", keywords: ["akia", "asia", "abia", "acca"] }),
     rule({ id: "aws-secret-key", label: "AWS secret access key", provider: "aws", regex: "(?i)aws_?secret_?(?:access_?)?key[\"']?\\s*[:=]\\s*[\"']?([A-Za-z0-9/+=]{40})\\b", keywords: ["aws"] }),
     rule({ id: "github-pat", label: "GitHub token", provider: "github", regex: "\\b((?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,255})\\b", keywords: ["ghp_", "gho_", "ghu_", "ghs_", "ghr_"], check: "github-checksum" }),
@@ -33,6 +33,8 @@ export const tripwirePack: Pack = {
     rule({ id: "figma-token", label: "Figma access token", provider: "figma", regex: "\\b(figd_[A-Za-z0-9_-]{40})\\b", keywords: ["figd_"] }),
     rule({ id: "neon-key", label: "Neon API key", provider: "neon", regex: "\\b(napi_[a-z0-9]{64})\\b", keywords: ["napi_"] }),
     rule({ id: "azure-storage-key", label: "Azure storage account key", provider: "azure", regex: "AccountKey=([A-Za-z0-9+/]{86}==)", keywords: ["accountkey="] }),
+    // https://user:password@host: credentials embedded in a URL. Tutorial passwords (admin:admin) rank low; see the db-password check.
+    rule({ id: "url-basic-auth", label: "Credentials in a URL", provider: "url", confidence: "medium", regex: "\\bhttps?:\\/\\/([^\\s:/@\"'<>{}$]{1,64}):([^\\s@\"'/<>{}$]{4,128})@[A-Za-z0-9][A-Za-z0-9.-]*", secretGroup: 2, check: "db-password", keywords: ["://"] }),
     // The password group is what gets checked; the whole URL is what gets reported.
     rule({ id: "db-url", label: "Database URL with password", provider: "database", regex: "\\b((?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\\+srv)?|redis|rediss|amqps?):\\/\\/[^\\s:/@\"']+:([^\\s@\"'/]+)@[^\\s\"']+)", secretGroup: 2, reportGroup: 1, minLength: 6, check: "db-password", keywords: ["://"] }),
     rule({ id: "tripwire-demo", label: "Tripwire demo secret", provider: "demo", regex: "\\b(tw_fake_[a-z]+_[a-z0-9]{16,})\\b", keywords: ["tw_fake_"] }),

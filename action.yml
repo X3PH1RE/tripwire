@@ -29,6 +29,9 @@ inputs:
   baseline:
     description: Accept the findings listed in .tripwire-baseline.json (create it with "tripwire baseline"). Accepted findings are reported but never fail the check.
     default: "true"
+  inline-ignore:
+    description: Honour tripwire:ignore / gitleaks:allow comments. Set to "false" to stop a pull request from hiding its own secret with one (ignored findings are always listed either way).
+    default: "true"
   token:
     description: Token used to comment on pull requests.
     default: ${{ github.token }}

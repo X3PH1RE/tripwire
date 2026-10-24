@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 // server/cli/action.ts
-import { readFileSync as readFileSync7 } from "node:fs";
+import { readFileSync as readFileSync8 } from "node:fs";
 
 // server/cli/main.ts
 import { writeFileSync as writeFileSync4 } from "node:fs";
@@ -9,22 +9,24 @@ import { parseArgs } from "node:util";
 import { resolve as resolve5 } from "node:path";
 
 // server/real/core.ts
-import { existsSync as existsSync5, rmSync as rmSync2 } from "node:fs";
-import { resolve as resolve3 } from "node:path";
+import { existsSync as existsSync5, readFileSync as readFileSync5, rmSync as rmSync2 } from "node:fs";
+import { join as join5, resolve as resolve3 } from "node:path";
 
 // server/detect/baseline.ts
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 var BASELINE_FILE = ".tripwire-baseline.json";
-function loadBaseline(dir) {
-  const path = join(dir, BASELINE_FILE);
-  if (!existsSync(path)) return /* @__PURE__ */ new Set();
+function baselineFromText(text) {
   try {
-    const doc = JSON.parse(readFileSync(path, "utf8"));
+    const doc = JSON.parse(text);
     return new Set((doc.entries ?? []).map((e) => e.fingerprint));
   } catch {
     return /* @__PURE__ */ new Set();
   }
+}
+function loadBaseline(dir) {
+  const path = join(dir, BASELINE_FILE);
+  return existsSync(path) ? baselineFromText(readFileSync(path, "utf8")) : /* @__PURE__ */ new Set();
 }
 function writeBaseline(dir, entries) {
   const unique = new Map(entries.map((e) => [e.fingerprint, e]));
@@ -776,7 +778,7 @@ async function verifyFindings(findings, values, honeyIds = /* @__PURE__ */ new S
 
 // server/real/scan.ts
 import { execFile } from "node:child_process";
-import { existsSync as existsSync4, mkdtempSync, readdirSync, readFileSync as readFileSync4, rmSync, statSync } from "node:fs";
+import { existsSync as existsSync4, lstatSync, mkdtempSync, readdirSync, readFileSync as readFileSync4, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join as join4, relative, resolve as resolve2 } from "node:path";
 import { promisify } from "node:util";
@@ -854,6 +856,7 @@ var KeywordIndex = class {
 
 // server/detect/engine.ts
 var MAX_LINE = 2e3;
+var LONG_OVERLAP = 400;
 var MAX_PER_RULE_PER_LINE = 10;
 var ASSIGN = /\b([A-Za-z][A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD|CREDENTIALS?|AUTH|URL|URI|DSN)|PASSWORD|PASSWD|SECRET|TOKEN|CREDENTIALS?)["']?\s*[:=]\s*["']?([^\s"'`,;&]+)/i;
 var STRONG_NAME = /SECRET|PASSWORD|PASSWD|PWD|TOKEN|API_?KEY|PRIVATE|CREDENTIAL/i;
@@ -944,7 +947,11 @@ var Engine = class {
     const lines = content.split(/\r?\n/);
     const decodeRules = forPath.filter((r) => !r.def.multiline);
     const perLine = this.candidates(lowerAll, lines.length, matching);
-    for (let i = 0; i < lines.length; i++) out.push(...this.scanLine(lines[i], path, startLine + i, perLine[i] ?? NO_RULES, decodeRules));
+    for (let i = 0; i < lines.length; i++) {
+      const text = lines[i];
+      if (text.length <= MAX_LINE) out.push(...this.scanLine(text, path, startLine + i, perLine[i] ?? NO_RULES, decodeRules));
+      else out.push(...this.scanLong(text, path, startLine + i, perLine[i] ?? NO_RULES, decodeRules));
+    }
     const multi = forPath.filter((r) => r.def.multiline && (!r.keywords.length || r.keywords.some((k) => lowerAll.includes(k))));
     if (multi.length) {
       const starts = [0];
@@ -993,8 +1000,35 @@ var Engine = class {
     for (const rules of perLine) if (rules && rules.length > 1) rules.sort((x, y) => x.index - y.index);
     return perLine;
   }
+  /**
+   * Minified bundles, source maps and one-line JSON are a single huge line. Skipping them would let a secret hide in
+   * `app.min.js`, so they are scanned in overlapping windows. The name-based generic rule is off here: in minified code
+   * every `a="..."` looks like an assignment.
+   */
+  scanLong(text, path, line, rules, decodeRules) {
+    const seen = /* @__PURE__ */ new Set();
+    const out = [];
+    const eligible = new Set(rules);
+    const always = this.always.filter((r) => eligible.has(r));
+    for (let at = 0; at < text.length; at += MAX_LINE - LONG_OVERLAP) {
+      const window = text.slice(at, at + MAX_LINE);
+      const picked = new Map(always.map((r) => [r.index, r]));
+      this.keywordIndex.scan(window.toLowerCase(), (keyword) => {
+        for (const r of this.keywordRules[keyword]) if (eligible.has(r)) picked.set(r.index, r);
+      });
+      const inWindow = [...picked.values()].sort((a, b) => a.index - b.index);
+      for (const h of this.scanLine(window, path, line, inWindow, decodeRules, void 0, false)) {
+        const key = `${h.rule.id}\0${h.value}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(h);
+      }
+      if (at + MAX_LINE >= text.length) break;
+    }
+    return out;
+  }
   /** `via` is set when `text` came out of a decoder; those lines were not pre-filtered by keyword, so they are checked here. */
-  scanLine(text, path, line, rules, decodeRules, via) {
+  scanLine(text, path, line, rules, decodeRules, via, allowGeneric = true) {
     if (text.length > MAX_LINE || text.length < MIN_LINE) return NO_HITS;
     let assign;
     const getAssign = () => assign === void 0 ? assign = text.match(ASSIGN) : assign;
@@ -1021,7 +1055,7 @@ var Engine = class {
       const resolved = resolve(hits);
       if (resolved.length) return via ? resolved.map((h) => h.via ? h : { ...h, via }) : resolved;
     }
-    const generic = this.generic(text, path, line, getAssign());
+    const generic = allowGeneric ? this.generic(text, path, line, getAssign()) : void 0;
     return generic ? [{ ...generic, via }] : NO_HITS;
   }
   /** Re-scans base64, URL-encoded and hex values on the line, so a secret hidden in encoding is still found. */
@@ -1125,7 +1159,7 @@ var gitleaks_default = {
     ],
     paths: [
       "gitleaks\\.toml",
-      "(?i)\\.(?:bmp|gif|jpe?g|png|svg|tiff?)$",
+      "(?i)\\.(?:bmp|gif|jpe?g|png|tiff?)$",
       "(?i)\\.(?:eot|[ot]tf|woff2?)$",
       "(?i)\\.(?:docx?|xlsx?|pdf|bin|socket|vsidx|v2|suo|wsuo|.dll|pdb|exe|gltf)$",
       "go\\.(?:mod|sum|work(?:\\.sum)?)$",
@@ -3851,7 +3885,7 @@ var tripwirePack = {
   source: "tripwire",
   rules: [
     // Only a complete BEGIN..END block counts; a bare header in docs or a truncated example does not.
-    rule({ id: "private-key", label: "Private key", provider: "ssh", multiline: true, regex: "-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----[\\w+/=:,.\\s-]{40,}?-----END (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----", keywords: ["private key"] }),
+    rule({ id: "private-key", label: "Private key", provider: "ssh", multiline: true, regex: "-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----(?:(?!-----BEGIN)[\\w+/=:,.\\s-]){40,16000}?-----END (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----", keywords: ["private key"] }),
     rule({ id: "aws-access-key", label: "AWS access key ID", provider: "aws", regex: "\\b((?:AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16})\\b", keywords: ["akia", "asia", "abia", "acca"] }),
     rule({ id: "aws-secret-key", label: "AWS secret access key", provider: "aws", regex: `(?i)aws_?secret_?(?:access_?)?key["']?\\s*[:=]\\s*["']?([A-Za-z0-9/+=]{40})\\b`, keywords: ["aws"] }),
     rule({ id: "github-pat", label: "GitHub token", provider: "github", regex: "\\b((?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,255})\\b", keywords: ["ghp_", "gho_", "ghu_", "ghs_", "ghr_"], check: "github-checksum" }),
@@ -3877,6 +3911,8 @@ var tripwirePack = {
     rule({ id: "figma-token", label: "Figma access token", provider: "figma", regex: "\\b(figd_[A-Za-z0-9_-]{40})\\b", keywords: ["figd_"] }),
     rule({ id: "neon-key", label: "Neon API key", provider: "neon", regex: "\\b(napi_[a-z0-9]{64})\\b", keywords: ["napi_"] }),
     rule({ id: "azure-storage-key", label: "Azure storage account key", provider: "azure", regex: "AccountKey=([A-Za-z0-9+/]{86}==)", keywords: ["accountkey="] }),
+    // https://user:password@host: credentials embedded in a URL. Tutorial passwords (admin:admin) rank low; see the db-password check.
+    rule({ id: "url-basic-auth", label: "Credentials in a URL", provider: "url", confidence: "medium", regex: `\\bhttps?:\\/\\/([^\\s:/@"'<>{}$]{1,64}):([^\\s@"'/<>{}$]{4,128})@[A-Za-z0-9][A-Za-z0-9.-]*`, secretGroup: 2, check: "db-password", keywords: ["://"] }),
     // The password group is what gets checked; the whole URL is what gets reported.
     rule({ id: "db-url", label: "Database URL with password", provider: "database", regex: `\\b((?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\\+srv)?|redis|rediss|amqps?):\\/\\/[^\\s:/@"']+:([^\\s@"'/]+)@[^\\s"']+)`, secretGroup: 2, reportGroup: 1, minLength: 6, check: "db-password", keywords: ["://"] }),
     rule({ id: "tripwire-demo", label: "Tripwire demo secret", provider: "demo", regex: "\\b(tw_fake_[a-z]+_[a-z0-9]{16,})\\b", keywords: ["tw_fake_"] })
@@ -3904,19 +3940,20 @@ function mask2(value, rule2) {
 
 // server/real/scan.ts
 var run = promisify(execFile);
-var SKIP_DIRS = /* @__PURE__ */ new Set([".git", "node_modules", "vendor", "dist", "build", ".next", "out", "coverage", "__pycache__", ".venv", "venv", "target"]);
-var SKIP_FILE = /(?:^|\/)(?:\.tripwire-baseline\.json|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|composer\.lock|Gemfile\.lock|poetry\.lock|Cargo\.lock|go\.sum)$|\.(?:min\.js|map|png|jpe?g|gif|webp|ico|svg|pdf|zip|gz|woff2?|ttf|eot|mp4|mp3|lock)$/i;
+var WALK_SKIP = /* @__PURE__ */ new Set([".git", "node_modules", "__pycache__", ".venv", "venv"]);
+var MAX_FILE_BYTES = Number(process.env.MAX_FILE_BYTES ?? 2e7);
+var SKIP_FILE = /(?:^|\/)\.tripwire-baseline\.json$|\.(?:png|jpe?g|gif|webp|ico|pdf|zip|gz|woff2?|ttf|eot|mp4|mp3)$/i;
 var MANIFESTS = /* @__PURE__ */ new Set(["package.json", "Dockerfile", "requirements.txt", "pyproject.toml", "go.mod", "composer.json", "Gemfile", "pom.xml", "build.gradle", "Cargo.toml", "Procfile"]);
 var CI_SERVICE = "CI (GitHub Actions)";
 var HISTORY_COMMITS = Number(process.env.SCAN_HISTORY_COMMITS ?? 300);
 function walk(dir, root = dir, out = []) {
   for (const name of readdirSync(dir)) {
-    if (SKIP_DIRS.has(name)) continue;
+    if (WALK_SKIP.has(name)) continue;
     const full = join4(dir, name);
-    const st = statSync(full, { throwIfNoEntry: false });
-    if (!st) continue;
+    const st = lstatSync(full, { throwIfNoEntry: false });
+    if (!st || st.isSymbolicLink()) continue;
     if (st.isDirectory()) walk(full, root, out);
-    else if (st.isFile() && st.size < 1e6) out.push(relative(root, full).split("\\").join("/"));
+    else if (st.isFile() && st.size < MAX_FILE_BYTES) out.push(relative(root, full).split("\\").join("/"));
   }
   return out;
 }
@@ -3924,9 +3961,9 @@ async function listFiles(dir) {
   if (!existsSync4(join4(dir, ".git"))) return walk(dir);
   try {
     const { stdout } = await run("git", ["-C", dir, "ls-files", "-z", "-co", "--exclude-standard"], { maxBuffer: 64 * 1024 * 1024 });
-    return stdout.split("\0").filter((f) => f && !f.split("/").some((part) => SKIP_DIRS.has(part))).filter((f) => {
-      const st = statSync(join4(dir, f), { throwIfNoEntry: false });
-      return !!st?.isFile() && st.size < 1e6;
+    return stdout.split("\0").filter((f) => f && !f.split("/").includes(".git")).filter((f) => {
+      const st = lstatSync(join4(dir, f), { throwIfNoEntry: false });
+      return !!st?.isFile() && st.size < MAX_FILE_BYTES;
     });
   } catch {
     return walk(dir);
@@ -4005,11 +4042,14 @@ function serviceFor(file, dirs, repoName) {
   return repoName;
 }
 var IGNORE_MARK = /tripwire:ignore|gitleaks:allow/;
-function findIn(content, file, startLine, service) {
+function findIn(content, file, startLine, service, ctx) {
   const lines = content.split(/\r?\n/);
   const out = [];
   for (const m of matchContent(content, file, startLine)) {
-    if (IGNORE_MARK.test(lines[m.line - startLine] ?? "")) continue;
+    if ((ctx?.honourInline ?? true) && IGNORE_MARK.test(lines[m.line - startLine] ?? "")) {
+      ctx?.hidden.push({ file, line: m.line, rule: m.rule.label });
+      continue;
+    }
     const provider = m.rule.id === "tripwire-demo" ? m.value.split("_")[2] ?? "demo" : m.rule.provider;
     out.push({
       value: m.value,
@@ -4018,17 +4058,17 @@ function findIn(content, file, startLine, service) {
   }
   return out;
 }
-function scanHead(dir, files, dirs, repoName) {
+function scanHead(dir, files, dirs, repoName, ctx) {
   const out = [];
   for (const file of files) {
     if (SKIP_FILE.test(file)) continue;
     const buf = readFileSync4(join4(dir, file));
     if (buf.includes(0)) continue;
-    out.push(...findIn(buf.toString("utf8"), file, 1, serviceFor(file, dirs, repoName)));
+    out.push(...findIn(buf.toString("utf8"), file, 1, serviceFor(file, dirs, repoName), ctx));
   }
   return out;
 }
-function parsePatch(patch, dirs, repoName, inHead) {
+function parsePatch(patch, dirs, repoName, inHead, ctx) {
   const raws = [];
   let commit = "";
   let file = "";
@@ -4037,7 +4077,7 @@ function parsePatch(patch, dirs, repoName, inHead) {
   let hunkStart = 0;
   const flush = () => {
     if (hunk.length && file && !SKIP_FILE.test(file))
-      for (const r of findIn(hunk.join("\n"), file, hunkStart, serviceFor(file, dirs, repoName))) raws.push({ ...r, finding: { ...r.finding, commit: commit || void 0, inHead } });
+      for (const r of findIn(hunk.join("\n"), file, hunkStart, serviceFor(file, dirs, repoName), ctx)) raws.push({ ...r, finding: { ...r.finding, commit: commit || void 0, inHead } });
     hunk = [];
   };
   for (const text of patch.split("\n")) {
@@ -4067,7 +4107,7 @@ async function scanHistory(dir, dirs, repoName, limit = HISTORY_COMMITS) {
     throw err;
   }
 }
-async function scanDiff(dir, dirs, repoName, base2) {
+async function scanDiff(dir, dirs, repoName, base2, ctx) {
   const diff = () => run("git", ["-C", dir, "diff", "-U0", "--no-color", "--no-ext-diff", base2, "HEAD"], GIT_BUF);
   let out;
   try {
@@ -4076,11 +4116,24 @@ async function scanDiff(dir, dirs, repoName, base2) {
     await run("git", ["-C", dir, "fetch", "--quiet", "--no-tags", "--depth=1", "origin", base2], { timeout: 6e4 });
     out = await diff();
   }
-  return parsePatch(out.stdout, dirs, repoName, true).raws;
+  return parsePatch(out.stdout, dirs, repoName, true, ctx).raws;
 }
-async function scanStaged(dir, dirs, repoName) {
+async function ensureRef(dir, ref) {
+  const has = () => run("git", ["-C", dir, "cat-file", "-e", `${ref}^{commit}`]).then(() => true, () => false);
+  if (await has()) return true;
+  await run("git", ["-C", dir, "fetch", "--quiet", "--no-tags", "--depth=1", "origin", ref], { timeout: 6e4 }).catch(() => void 0);
+  return has();
+}
+async function readAtRef(dir, ref, path) {
+  try {
+    return (await run("git", ["-C", dir, "show", `${ref}:${path}`], { maxBuffer: 16 * 1024 * 1024 })).stdout;
+  } catch {
+    return void 0;
+  }
+}
+async function scanStaged(dir, dirs, repoName, ctx) {
   const { stdout } = await run("git", ["-C", dir, "diff", "--cached", "-U0", "--no-color", "--no-ext-diff", "--diff-filter=ACMR"], GIT_BUF);
-  return parsePatch(stdout, dirs, repoName, true).raws;
+  return parsePatch(stdout, dirs, repoName, true, ctx).raws;
 }
 function mergeFindings(head, history, added) {
   const byValue = /* @__PURE__ */ new Map();
@@ -4148,26 +4201,45 @@ async function scanTarget(input2, opts = {}, onStage) {
   try {
     if (remote) dir = await cloneRepo(target, history);
     else if (!existsSync5(dir)) throw new Error(`No such directory: ${target}`);
-    const ignored = loadIgnore(dir);
+    const baseRef = opts.diff && !opts.staged && await ensureRef(dir, opts.diff) ? opts.diff : void 0;
+    let ignored = loadIgnore(dir);
+    let accepted = /* @__PURE__ */ new Set();
+    if (baseRef) {
+      ignored = ignoreMatcher(await readAtRef(dir, baseRef, ".tripwireignore") ?? "");
+      if (opts.baseline !== false) accepted = baselineFromText(await readAtRef(dir, baseRef, BASELINE_FILE) ?? "");
+      for (const p of [".tripwireignore", BASELINE_FILE]) {
+        const now = existsSync5(join5(dir, p)) ? readFileSync5(join5(dir, p), "utf8") : "";
+        if (now !== (await readAtRef(dir, baseRef, p) ?? "")) warnings.push(`This change edits ${p}. Tripwire used the version from ${opts.diff}, so the change cannot switch the check off.`);
+      }
+    } else if (opts.baseline !== false) accepted = loadBaseline(dir);
+    const suppressedHead = [];
+    const suppressedChange = [];
+    const honourInline = opts.inlineIgnore !== false;
+    const ctxHead = { hidden: suppressedHead, honourInline };
+    const ctxChange = { hidden: suppressedChange, honourInline };
     const files = (await listFiles(dir)).filter((f) => !ignored(f));
     const dirs = manifestDirs(files);
     const name = repoNameOf(target, dir);
     const branch = await currentBranch(dir).catch(() => void 0);
     onStage?.("secrets", { branch, filesScanned: files.length });
-    const staged = opts.staged ? (await scanStaged(dir, dirs, name)).filter((r) => !ignored(r.finding.file)) : void 0;
-    const head = staged ?? scanHead(dir, files, dirs, name);
+    const staged = opts.staged ? (await scanStaged(dir, dirs, name, ctxChange)).filter((r) => !ignored(r.finding.file)) : void 0;
+    const head = staged ?? scanHead(dir, files, dirs, name, ctxHead);
     onStage?.("history", {});
     const past = staged ? { raws: [], commits: 0 } : await scanHistory(dir, dirs, name, history);
     let added = staged ? new Set(staged.map((r) => r.value)) : void 0;
     if (opts.diff && !staged) {
       try {
-        added = new Set((await scanDiff(dir, dirs, name, opts.diff)).filter((r) => !ignored(r.finding.file)).map((r) => r.value));
+        added = new Set((await scanDiff(dir, dirs, name, opts.diff, ctxChange)).filter((r) => !ignored(r.finding.file)).map((r) => r.value));
       } catch (err) {
         warnings.push(`Could not diff against ${opts.diff} (${err.message.split("\n")[0]}); treating every secret in the code as blocking.`);
       }
     }
     const { findings, samples, values } = mergeFindings(head, past.raws.filter((r) => !ignored(r.finding.file)), added);
-    const accepted = opts.baseline === false ? /* @__PURE__ */ new Set() : loadBaseline(dir);
+    const hidden = opts.staged || opts.diff ? suppressedChange : suppressedHead;
+    if (hidden.length) {
+      const where = hidden.slice(0, 8).map((s) => `${s.file}:${s.line} (${s.rule})`).join(", ");
+      warnings.push(`${hidden.length} secret${hidden.length === 1 ? "" : "s"} hidden by an inline tripwire:ignore / gitleaks:allow marker${opts.diff ? " in this change" : ""}: ${where}${hidden.length > 8 ? ", \u2026" : ""}`);
+    }
     for (const f of findings) {
       f.fingerprint = fingerprint(f.rule, f.file, values.get(f.id) ?? "");
       if (accepted.has(f.fingerprint)) f.baselined = true;
@@ -4193,7 +4265,7 @@ var CONFIDENCE_RANK = { low: 0, medium: 1, high: 2 };
 // server/contain/index.ts
 import { appendFileSync, mkdirSync as mkdirSync2 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
-import { dirname as dirname3, join as join5 } from "node:path";
+import { dirname as dirname3, join as join6 } from "node:path";
 
 // server/graph.ts
 function blastHops(edges, startIds) {
@@ -4324,7 +4396,7 @@ function buildPlan(report) {
 }
 
 // server/contain/index.ts
-var containLog = () => join5(process.env.TRIPWIRE_HOME ?? join5(homedir2(), ".tripwire"), "contain-log.jsonl");
+var containLog = () => join6(process.env.TRIPWIRE_HOME ?? join6(homedir2(), ".tripwire"), "contain-log.jsonl");
 var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function record(file, entry) {
   if (file === false) return;
@@ -4418,7 +4490,7 @@ async function contain(target, apply, json2, log, err, quiet) {
 
 // server/cli/hook.ts
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync as existsSync6, mkdirSync as mkdirSync3, readFileSync as readFileSync5, rmSync as rmSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { chmodSync, existsSync as existsSync6, mkdirSync as mkdirSync3, readFileSync as readFileSync6, rmSync as rmSync3, writeFileSync as writeFileSync3 } from "node:fs";
 import { dirname as dirname4, resolve as resolve4 } from "node:path";
 var HOOK_MARKER = "# tripwire-hook";
 var HOOK_SCRIPT = `#!/bin/sh
@@ -4442,7 +4514,7 @@ function installHook(target, opts, log, err) {
     return err(`${dir} is not a git repository.
 `), 2;
   }
-  const existing = existsSync6(path) ? readFileSync5(path, "utf8") : void 0;
+  const existing = existsSync6(path) ? readFileSync6(path, "utf8") : void 0;
   const ours = existing?.includes(HOOK_MARKER);
   if (opts.remove) {
     if (!existing) return log("No pre-commit hook installed.\n"), 0;
@@ -4467,7 +4539,7 @@ Commits now fail if they add a secret. Bypass once with \`git commit --no-verify
 }
 
 // server/cli/github.ts
-import { appendFileSync as appendFileSync2, readFileSync as readFileSync6 } from "node:fs";
+import { appendFileSync as appendFileSync2, readFileSync as readFileSync7 } from "node:fs";
 
 // server/cli/report.ts
 var MARKER = "<!-- tripwire-report -->";
@@ -4569,7 +4641,7 @@ function pullRequestNumber() {
   const path = process.env.GITHUB_EVENT_PATH;
   if (!path) return void 0;
   try {
-    return JSON.parse(readFileSync6(path, "utf8")).pull_request?.number;
+    return JSON.parse(readFileSync7(path, "utf8")).pull_request?.number;
   } catch {
     return void 0;
   }
@@ -4606,6 +4678,7 @@ Options:
   --min-confidence <c>    Only findings at this confidence or above block: low|medium|high (default: low)
   --staged                Scan only what is staged for commit (pre-commit hooks); fast, no history
   --apply                 contain: actually revoke live keys (default is a dry-run plan)
+  --no-inline-ignore      Do not let tripwire:ignore / gitleaks:allow comments hide anything (for CI)
   --no-baseline           Ignore .tripwire-baseline.json
   --verify                Ask each provider (read-only) if found keys work and what they reach
   --json <file|->         Write the full report as JSON
@@ -4630,6 +4703,7 @@ async function main(argv2, log = (s) => process.stdout.write(s), err = (s) => pr
       verify: { type: "boolean" },
       "min-confidence": { type: "string", default: "low" },
       "no-baseline": { type: "boolean" },
+      "no-inline-ignore": { type: "boolean" },
       apply: { type: "boolean" },
       staged: { type: "boolean" },
       remove: { type: "boolean" },
@@ -4661,7 +4735,7 @@ ${HELP}`), 2;
 `), 2;
   const history = values.history === void 0 ? void 0 : Number(values.history);
   if (history !== void 0 && !(history >= 0)) return err("--history must be a number >= 0\n"), 2;
-  const report = await scanTarget(target, { history, diff: values.diff, staged: !!values.staged, vulns: !values["skip-vulns"] && !values.staged, verify: !!values.verify, baseline: !values["no-baseline"] }, (stage) => !values.quiet && !values.staged && err(`tripwire: ${stage}\u2026
+  const report = await scanTarget(target, { history, diff: values.diff, staged: !!values.staged, vulns: !values["skip-vulns"] && !values.staged, verify: !!values.verify, baseline: !values["no-baseline"], inlineIgnore: !values["no-inline-ignore"] }, (stage) => !values.quiet && !values.staged && err(`tripwire: ${stage}\u2026
 `));
   const verdict = evaluate(report, { secrets: !values["no-fail-secrets"], vulns: failVulns === "NONE" ? "none" : failVulns, minConfidence });
   const markdown = toMarkdown(report, verdict);
@@ -4724,7 +4798,7 @@ Commit ${BASELINE_FILE}; those findings are still listed but no longer fail the 
 var input = (name, fallback = "") => (process.env[`INPUT_${name.toUpperCase()}`] ?? "").trim() || fallback;
 function baseSha() {
   try {
-    return JSON.parse(readFileSync7(process.env.GITHUB_EVENT_PATH ?? "", "utf8")).pull_request?.base?.sha;
+    return JSON.parse(readFileSync8(process.env.GITHUB_EVENT_PATH ?? "", "utf8")).pull_request?.base?.sha;
   } catch {
     return void 0;
   }
@@ -4738,6 +4812,7 @@ if (base && input("comment", "true") === "true") argv.push("--comment");
 if (input("fail-on-secrets", "true") === "false") argv.push("--no-fail-secrets");
 if (input("verify", "false") === "true") argv.push("--verify");
 if (input("baseline", "true") === "false") argv.push("--no-baseline");
+if (input("inline-ignore", "true") === "false") argv.push("--no-inline-ignore");
 argv.push("--min-confidence", input("min-confidence", "low"));
 main(argv).then(
   (code) => process.exit(code),

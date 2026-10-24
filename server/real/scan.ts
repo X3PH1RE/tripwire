@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, lstatSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -9,20 +9,24 @@ import { mask, matchContent } from "./rules";
 
 const run = promisify(execFile);
 
-const SKIP_DIRS = new Set([".git", "node_modules", "vendor", "dist", "build", ".next", "out", "coverage", "__pycache__", ".venv", "venv", "target"]);
-const SKIP_FILE = /(?:^|\/)(?:\.tripwire-baseline\.json|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|composer\.lock|Gemfile\.lock|poetry\.lock|Cargo\.lock|go\.sum)$|\.(?:min\.js|map|png|jpe?g|gif|webp|ico|svg|pdf|zip|gz|woff2?|ttf|eot|mp4|mp3|lock)$/i;
+/** Skipped only when walking a plain folder (no git): dependency and cache trees nobody commits. Inside a git repo every tracked file is scanned, so a directory name is never a hiding place. */
+const WALK_SKIP = new Set([".git", "node_modules", "__pycache__", ".venv", "venv"]);
+const MAX_FILE_BYTES = Number(process.env.MAX_FILE_BYTES ?? 20_000_000);
+/** Binary and media formats, plus Tripwire's own baseline. Minified bundles, source maps and lockfiles are scanned: secrets end up in all of them. */
+const SKIP_FILE = /(?:^|\/)\.tripwire-baseline\.json$|\.(?:png|jpe?g|gif|webp|ico|pdf|zip|gz|woff2?|ttf|eot|mp4|mp3)$/i;
 const MANIFESTS = new Set(["package.json", "Dockerfile", "requirements.txt", "pyproject.toml", "go.mod", "composer.json", "Gemfile", "pom.xml", "build.gradle", "Cargo.toml", "Procfile"]);
 export const CI_SERVICE = "CI (GitHub Actions)";
 const HISTORY_COMMITS = Number(process.env.SCAN_HISTORY_COMMITS ?? 300);
 
 export function walk(dir: string, root = dir, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {
-    if (SKIP_DIRS.has(name)) continue;
+    if (WALK_SKIP.has(name)) continue;
     const full = join(dir, name);
-    const st = statSync(full, { throwIfNoEntry: false });
-    if (!st) continue;
+    // lstat: a symlink must never be followed out of the tree being scanned.
+    const st = lstatSync(full, { throwIfNoEntry: false });
+    if (!st || st.isSymbolicLink()) continue;
     if (st.isDirectory()) walk(full, root, out);
-    else if (st.isFile() && st.size < 1_000_000) out.push(relative(root, full).split("\\").join("/"));
+    else if (st.isFile() && st.size < MAX_FILE_BYTES) out.push(relative(root, full).split("\\").join("/"));
   }
   return out;
 }
@@ -34,10 +38,11 @@ export async function listFiles(dir: string): Promise<string[]> {
     const { stdout } = await run("git", ["-C", dir, "ls-files", "-z", "-co", "--exclude-standard"], { maxBuffer: 64 * 1024 * 1024 });
     return stdout
       .split("\0")
-      .filter((f) => f && !f.split("/").some((part) => SKIP_DIRS.has(part)))
+      .filter((f) => f && !f.split("/").includes(".git"))
       .filter((f) => {
-        const st = statSync(join(dir, f), { throwIfNoEntry: false });
-        return !!st?.isFile() && st.size < 1_000_000;
+        // lstat reports a symlink as a symlink, not as the file it points to, so links are dropped (they could point at ~/.aws/credentials).
+        const st = lstatSync(join(dir, f), { throwIfNoEntry: false });
+        return !!st?.isFile() && st.size < MAX_FILE_BYTES;
       });
   } catch {
     return walk(dir);
@@ -136,12 +141,28 @@ export interface Raw {
 
 const IGNORE_MARK = /tripwire:ignore|gitleaks:allow/;
 
+/** A secret that an inline marker hid. Reported, so a reviewer sees what was waved through. */
+export interface Suppressed {
+  file: string;
+  line: number;
+  rule: string;
+}
+
+/** What inline markers do for one scan: hidden findings are collected here; with `honourInline: false` markers hide nothing. */
+export interface IgnoreCtx {
+  hidden: Suppressed[];
+  honourInline: boolean;
+}
+
 /** Scans a file or diff hunk (`startLine` is its first line number) and turns each hit into a finding. */
-function findIn(content: string, file: string, startLine: number, service: string): Raw[] {
+function findIn(content: string, file: string, startLine: number, service: string, ctx?: IgnoreCtx): Raw[] {
   const lines = content.split(/\r?\n/);
   const out: Raw[] = [];
   for (const m of matchContent(content, file, startLine)) {
-    if (IGNORE_MARK.test(lines[m.line - startLine] ?? "")) continue;
+    if ((ctx?.honourInline ?? true) && IGNORE_MARK.test(lines[m.line - startLine] ?? "")) {
+      ctx?.hidden.push({ file, line: m.line, rule: m.rule.label });
+      continue;
+    }
     const provider = m.rule.id === "tripwire-demo" ? (m.value.split("_")[2] ?? "demo") : m.rule.provider;
     out.push({
       value: m.value,
@@ -151,18 +172,18 @@ function findIn(content: string, file: string, startLine: number, service: strin
   return out;
 }
 
-export function scanHead(dir: string, files: string[], dirs: Set<string>, repoName: string): Raw[] {
+export function scanHead(dir: string, files: string[], dirs: Set<string>, repoName: string, ctx?: IgnoreCtx): Raw[] {
   const out: Raw[] = [];
   for (const file of files) {
     if (SKIP_FILE.test(file)) continue;
     const buf = readFileSync(join(dir, file));
     if (buf.includes(0)) continue;
-    out.push(...findIn(buf.toString("utf8"), file, 1, serviceFor(file, dirs, repoName)));
+    out.push(...findIn(buf.toString("utf8"), file, 1, serviceFor(file, dirs, repoName), ctx));
   }
   return out;
 }
 
-function parsePatch(patch: string, dirs: Set<string>, repoName: string, inHead: boolean): { raws: Raw[]; commits: number } {
+function parsePatch(patch: string, dirs: Set<string>, repoName: string, inHead: boolean, ctx?: IgnoreCtx): { raws: Raw[]; commits: number } {
   const raws: Raw[] = [];
   let commit = "";
   let file = "";
@@ -172,7 +193,7 @@ function parsePatch(patch: string, dirs: Set<string>, repoName: string, inHead: 
   let hunkStart = 0;
   const flush = () => {
     if (hunk.length && file && !SKIP_FILE.test(file))
-      for (const r of findIn(hunk.join("\n"), file, hunkStart, serviceFor(file, dirs, repoName))) raws.push({ ...r, finding: { ...r.finding, commit: commit || undefined, inHead } });
+      for (const r of findIn(hunk.join("\n"), file, hunkStart, serviceFor(file, dirs, repoName), ctx)) raws.push({ ...r, finding: { ...r.finding, commit: commit || undefined, inHead } });
     hunk = [];
   };
   for (const text of patch.split("\n")) {
@@ -208,7 +229,7 @@ export async function scanHistory(dir: string, dirs: Set<string>, repoName: stri
 }
 
 /** Lines added between `base` and HEAD, i.e. what a pull request introduces. Fetches `base` if a shallow checkout lacks it. */
-export async function scanDiff(dir: string, dirs: Set<string>, repoName: string, base: string): Promise<Raw[]> {
+export async function scanDiff(dir: string, dirs: Set<string>, repoName: string, base: string, ctx?: IgnoreCtx): Promise<Raw[]> {
   const diff = () => run("git", ["-C", dir, "diff", "-U0", "--no-color", "--no-ext-diff", base, "HEAD"], GIT_BUF);
   let out: { stdout: string };
   try {
@@ -217,13 +238,30 @@ export async function scanDiff(dir: string, dirs: Set<string>, repoName: string,
     await run("git", ["-C", dir, "fetch", "--quiet", "--no-tags", "--depth=1", "origin", base], { timeout: 60_000 });
     out = await diff();
   }
-  return parsePatch(out.stdout, dirs, repoName, true).raws;
+  return parsePatch(out.stdout, dirs, repoName, true, ctx).raws;
+}
+
+/** True when `ref` exists locally, fetching it first if a shallow checkout lacks it. */
+export async function ensureRef(dir: string, ref: string): Promise<boolean> {
+  const has = () => run("git", ["-C", dir, "cat-file", "-e", `${ref}^{commit}`]).then(() => true, () => false);
+  if (await has()) return true;
+  await run("git", ["-C", dir, "fetch", "--quiet", "--no-tags", "--depth=1", "origin", ref], { timeout: 60_000 }).catch(() => undefined);
+  return has();
+}
+
+/** A file as it was at `ref`, or undefined if it did not exist there. */
+export async function readAtRef(dir: string, ref: string, path: string): Promise<string | undefined> {
+  try {
+    return (await run("git", ["-C", dir, "show", `${ref}:${path}`], { maxBuffer: 16 * 1024 * 1024 })).stdout;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Lines added to the index (`git add`ed, not yet committed): what a pre-commit hook must stop. */
-export async function scanStaged(dir: string, dirs: Set<string>, repoName: string): Promise<Raw[]> {
+export async function scanStaged(dir: string, dirs: Set<string>, repoName: string, ctx?: IgnoreCtx): Promise<Raw[]> {
   const { stdout } = await run("git", ["-C", dir, "diff", "--cached", "-U0", "--no-color", "--no-ext-diff", "--diff-filter=ACMR"], GIT_BUF);
-  return parsePatch(stdout, dirs, repoName, true).raws;
+  return parsePatch(stdout, dirs, repoName, true, ctx).raws;
 }
 
 /** Merges HEAD and history hits: one finding per distinct secret value; history-only ones are flagged. */

@@ -22,12 +22,13 @@ function repo(): string {
   mkdirSync(join(dir, "api"));
   writeFileSync(join(dir, "api/package.json"), "{}");
   writeFileSync(join(dir, "api/.env"), `${DB}\n`);
+  // The ignore file is part of the base: a change under review cannot bring its own.
+  writeFileSync(join(dir, ".tripwireignore"), "# test data\nfixtures/\n");
   git("add", "-A");
   git("commit", "-qm", "base");
   writeFileSync(join(dir, "api/pay.js"), `const key = "${STRIPE}";\nconst other = "${STRIPE.replace("Zq", "Aa")}"; // tripwire:ignore\n`);
   mkdirSync(join(dir, "fixtures"));
   writeFileSync(join(dir, "fixtures/sample.env"), `STRIPE_KEY=${STRIPE.replace("Zq", "Bb")}\n`);
-  writeFileSync(join(dir, ".tripwireignore"), "# test data\nfixtures/\n");
   git("add", "-A");
   git("commit", "-qm", "add payments");
   return dir;

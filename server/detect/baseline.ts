@@ -15,15 +15,18 @@ export interface Baseline {
   entries: BaselineEntry[];
 }
 
-export function loadBaseline(dir: string): Set<string> {
-  const path = join(dir, BASELINE_FILE);
-  if (!existsSync(path)) return new Set();
+export function baselineFromText(text: string): Set<string> {
   try {
-    const doc = JSON.parse(readFileSync(path, "utf8")) as Baseline;
+    const doc = JSON.parse(text) as Baseline;
     return new Set((doc.entries ?? []).map((e) => e.fingerprint));
   } catch {
     return new Set();
   }
+}
+
+export function loadBaseline(dir: string): Set<string> {
+  const path = join(dir, BASELINE_FILE);
+  return existsSync(path) ? baselineFromText(readFileSync(path, "utf8")) : new Set();
 }
 
 export function writeBaseline(dir: string, entries: BaselineEntry[]): string {

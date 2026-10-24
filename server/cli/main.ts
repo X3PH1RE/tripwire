@@ -30,6 +30,7 @@ Options:
   --min-confidence <c>    Only findings at this confidence or above block: low|medium|high (default: low)
   --staged                Scan only what is staged for commit (pre-commit hooks); fast, no history
   --apply                 contain: actually revoke live keys (default is a dry-run plan)
+  --no-inline-ignore      Do not let tripwire:ignore / gitleaks:allow comments hide anything (for CI)
   --no-baseline           Ignore .tripwire-baseline.json
   --verify                Ask each provider (read-only) if found keys work and what they reach
   --json <file|->         Write the full report as JSON
@@ -55,6 +56,7 @@ export async function main(argv: string[], log: (s: string) => void = (s) => pro
       verify: { type: "boolean" },
       "min-confidence": { type: "string", default: "low" },
       "no-baseline": { type: "boolean" },
+      "no-inline-ignore": { type: "boolean" },
       apply: { type: "boolean" },
       staged: { type: "boolean" },
       remove: { type: "boolean" },
@@ -84,7 +86,7 @@ export async function main(argv: string[], log: (s: string) => void = (s) => pro
   const history = values.history === undefined ? undefined : Number(values.history);
   if (history !== undefined && !(history >= 0)) return err("--history must be a number >= 0\n"), 2;
 
-  const report = await scanTarget(target, { history, diff: values.diff, staged: !!values.staged, vulns: !values["skip-vulns"] && !values.staged, verify: !!values.verify, baseline: !values["no-baseline"] }, (stage) => !values.quiet && !values.staged && err(`tripwire: ${stage}…\n`));
+  const report = await scanTarget(target, { history, diff: values.diff, staged: !!values.staged, vulns: !values["skip-vulns"] && !values.staged, verify: !!values.verify, baseline: !values["no-baseline"], inlineIgnore: !values["no-inline-ignore"] }, (stage) => !values.quiet && !values.staged && err(`tripwire: ${stage}…\n`));
   const verdict = evaluate(report, { secrets: !values["no-fail-secrets"], vulns: failVulns === "NONE" ? "none" : (failVulns as Severity), minConfidence: minConfidence as Confidence });
   const markdown = toMarkdown(report, verdict);
 

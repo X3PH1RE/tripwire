@@ -23,7 +23,7 @@
   ],
   "paths": [
    "gitleaks\\.toml",
-   "(?i)\\.(?:bmp|gif|jpe?g|png|svg|tiff?)$",
+   "(?i)\\.(?:bmp|gif|jpe?g|png|tiff?)$",
    "(?i)\\.(?:eot|[ot]tf|woff2?)$",
    "(?i)\\.(?:docx?|xlsx?|pdf|bin|socket|vsidx|v2|suo|wsuo|.dll|pdb|exe|gltf)$",
    "go\\.(?:mod|sum|work(?:\\.sum)?)$",

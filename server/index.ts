@@ -6,6 +6,7 @@ import type { BlastResult } from "../shared/types";
 import { cleanupInBackground, simulateCve } from "./cve";
 import { blastHops } from "./graph";
 import { PROVIDERS, plantTripwires, simulateAttacker, simulateBreach } from "./incidents";
+import { guard } from "./guard";
 import { cannedBlast, generate } from "./llm";
 import { clearScan, createHoney, honeyAction, plantHoney, pollHoney, startContain, startFix, startHoneyPolling, startScan } from "./real/index";
 import { contain } from "./rotation";
@@ -18,6 +19,8 @@ cleanupInBackground();
 startHoneyPolling();
 
 const app = express();
+app.disable("x-powered-by");
+app.use(guard());
 app.use(express.json());
 
 app.get("/api/state", (_req, res) => {
@@ -136,4 +139,6 @@ app.post("/api/real/honey/check", async (_req, res) => {
 });
 
 const port = Number(process.env.PORT ?? 3001);
-app.listen(port, () => console.log(`tripwire server on http://localhost:${port}`));
+// Loopback only by default: the API is unauthenticated and can scan this machine and revoke keys. HOST=0.0.0.0 (plus ALLOWED_HOSTS) is opt-in.
+const host = process.env.HOST ?? "127.0.0.1";
+app.listen(port, host, () => console.log(`tripwire server on http://localhost:${port} (listening on ${host})`));
