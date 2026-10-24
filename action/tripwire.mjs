@@ -370,7 +370,7 @@ async function createHoney(opts) {
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok || data.error || !data.aws_access_key_id) throw new Error(`Canarytokens: ${data.error_message ?? data.error ?? res.status}`);
-  const record = {
+  const record2 = {
     id: randomUUID().slice(0, 8),
     token: data.token,
     auth: data.auth_token,
@@ -382,8 +382,8 @@ async function createHoney(opts) {
     repo: opts.repo,
     hits: []
   };
-  saveHoney([...loadHoney(), record]);
-  return record;
+  saveHoney([...loadHoney(), record2]);
+  return record2;
 }
 var first = (v) => Array.isArray(v) ? v[0] : v;
 function parseHits(raw) {
@@ -739,12 +739,13 @@ async function verifyOne(f, value, context) {
   }
 }
 var VERIFIABLE = /* @__PURE__ */ new Set(["aws", "github", "stripe", "stripe-test", "slack", "openai", "anthropic", "sendgrid", "npm"]);
+function awsSecretFor(findings, f) {
+  const secrets = findings.filter((s) => s.rule === "aws-secret-key");
+  const near = secrets.filter((s) => s.file === f.file).sort((a, b) => Math.abs(a.line - f.line) - Math.abs(b.line - f.line))[0];
+  return near ?? (secrets.length === 1 ? secrets[0] : void 0);
+}
 async function verifyFindings(findings, values, honeyIds = /* @__PURE__ */ new Set()) {
-  const secrets = findings.filter((f) => f.rule === "aws-secret-key");
-  const pairFor = (f) => {
-    const near = secrets.filter((s) => s.file === f.file).sort((a, b) => Math.abs(a.line - f.line) - Math.abs(b.line - f.line))[0];
-    return near ?? (secrets.length === 1 ? secrets[0] : void 0);
-  };
+  const pairFor = (f) => awsSecretFor(findings, f);
   const queue = findings.filter((f) => VERIFIABLE.has(f.provider));
   let i = 0;
   const worker = async () => {
@@ -4142,6 +4143,7 @@ async function scanTarget(input, opts = {}, onStage) {
       onStage?.("verify", { commitsScanned: past.commits, findings });
       await verifyFindings(findings, values, honeyKeyIds()).catch((err) => warnings.push(`Key verification failed: ${err.message}`));
     }
+    opts.onValues?.(values);
     const graph = buildGraph(name, findings, ciSecretRefs(dir, files), samples);
     onStage?.("vulns", { commitsScanned: past.commits, findings, ...graph });
     let vulns = [];
@@ -4155,8 +4157,10 @@ async function scanTarget(input, opts = {}, onStage) {
 // server/detect/schema.ts
 var CONFIDENCE_RANK = { low: 0, medium: 1, high: 2 };
 
-// server/cli/github.ts
-import { appendFileSync, readFileSync as readFileSync5 } from "node:fs";
+// server/contain/index.ts
+import { appendFileSync, mkdirSync as mkdirSync2 } from "node:fs";
+import { homedir as homedir2 } from "node:os";
+import { dirname as dirname3, join as join5 } from "node:path";
 
 // server/graph.ts
 function blastHops(edges, startIds) {
@@ -4179,6 +4183,208 @@ function blastHops(edges, startIds) {
   }
   return hops;
 }
+
+// server/contain/providers.ts
+var TIMEOUT2 = Number(process.env.CONTAIN_TIMEOUT_MS ?? 1e4);
+var signal = () => AbortSignal.timeout(TIMEOUT2);
+var secretOf = (ctx) => ctx.values.get(ctx.finding.id) ?? "";
+var github = async (ctx) => {
+  const res = await fetch("https://api.github.com/credentials/revoke", {
+    method: "POST",
+    headers: { Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "Content-Type": "application/json" },
+    body: JSON.stringify({ credentials: [secretOf(ctx)] }),
+    signal: signal()
+  });
+  return res.status === 202 ? { ok: true, note: "GitHub accepted the revocation." } : { ok: false, note: `GitHub returned ${res.status}.` };
+};
+var slack = async (ctx) => {
+  const res = await fetch("https://slack.com/api/auth.revoke", { method: "POST", headers: { Authorization: `Bearer ${secretOf(ctx)}` }, signal: signal() });
+  const data = await res.json().catch(() => ({}));
+  return data.ok ? { ok: true, note: "Slack revoked the token." } : { ok: false, note: `Slack: ${data.error ?? res.status}.` };
+};
+var gitlab = async (ctx) => {
+  const res = await fetch("https://gitlab.com/api/v4/personal_access_tokens/self", { method: "DELETE", headers: { "PRIVATE-TOKEN": secretOf(ctx) }, signal: signal() });
+  return res.status === 204 ? { ok: true, note: "GitLab revoked the token." } : { ok: false, note: `GitLab returned ${res.status}.` };
+};
+var aws = async (ctx) => {
+  const id = secretOf(ctx);
+  const arn = ctx.finding.verify?.identity ?? "";
+  const user = arn.includes(":user/") ? arn.split("/").pop() : void 0;
+  if (!user) return { ok: false, note: "Only IAM user access keys can be deactivated this way (this key's identity is not an IAM user)." };
+  const pair = awsSecretFor(ctx.findings, ctx.finding);
+  const secret = pair ? ctx.values.get(pair.id) : void 0;
+  if (!secret) return { ok: false, note: "No matching AWS secret access key was found next to this key ID." };
+  const body = `Action=UpdateAccessKey&AccessKeyId=${encodeURIComponent(id)}&Status=Inactive&UserName=${encodeURIComponent(user)}&Version=2010-05-08`;
+  const res = await fetch("https://iam.amazonaws.com/", { method: "POST", headers: sigV4({ id, secret, service: "iam", host: "iam.amazonaws.com", region: "us-east-1", body, now: /* @__PURE__ */ new Date() }), body, signal: signal() });
+  if (!res.ok) {
+    const code = (await res.text()).match(/<Code>([^<]*)<\/Code>/)?.[1] ?? res.status;
+    return { ok: false, note: `AWS refused (${code}). The key may lack iam:UpdateAccessKey.` };
+  }
+  return { ok: true, note: `Deactivated ${id} for IAM user ${user}.`, reactivate: `aws iam update-access-key --access-key-id ${id} --status Active --user-name ${user}` };
+};
+var REVOKERS = { github, slack, gitlab, aws };
+var GUIDES = {
+  stripe: { url: "https://dashboard.stripe.com/apikeys", steps: ["Roll the key (Developers > API keys > Roll key). There is no API to do it for you.", "Deploy the new key.", "Check Developers > Logs for charges or refunds you do not recognise."] },
+  "stripe-test": { url: "https://dashboard.stripe.com/test/apikeys", steps: ["Roll the test key; it cannot move real money, but it exposes test customer data."] },
+  openai: { url: "https://platform.openai.com/api-keys", steps: ["Delete the key and create a new one.", "Check the usage dashboard for spend you do not recognise."] },
+  anthropic: { url: "https://console.anthropic.com/settings/keys", steps: ["Delete the key and create a new one.", "Check usage for spend you do not recognise."] },
+  sendgrid: { url: "https://app.sendgrid.com/settings/api_keys", steps: ["Delete the key, create a new one with the least scope it needs.", "Check Activity for mail you did not send."] },
+  npm: { url: "https://www.npmjs.com/settings/~/tokens", steps: ["Revoke the token (or run `npm token revoke <id>`), then create a granular replacement.", "Check your packages for versions you did not publish."] },
+  gcp: { url: "https://console.cloud.google.com/apis/credentials", steps: ["Delete or regenerate the API key and restrict the new one to the APIs and referrers it needs.", "Check API usage for spikes."] },
+  twilio: { url: "https://console.twilio.com/us1/account/keys-credentials/api-keys", steps: ["Delete the API key and create a new one.", "Check the usage logs for messages or calls you did not make."] },
+  database: { steps: ["Change the password: ALTER USER <user> WITH PASSWORD '<new>' (or the equivalent), then update the connection string wherever it is used.", "Restrict the database to the hosts that need it, and check its logs for unknown clients."] },
+  ssh: { steps: ["Remove the matching public key from every server's authorized_keys and from GitHub/GitLab deploy keys.", "Generate a new key pair and install the new public key."] },
+  github: { url: "https://github.com/settings/tokens", steps: ["Delete the token in Settings > Developer settings, then create a replacement with the least scope it needs."] },
+  gitlab: { url: "https://gitlab.com/-/user_settings/personal_access_tokens", steps: ["Revoke the token, then create a replacement with the least scope it needs."] },
+  slack: { url: "https://api.slack.com/apps", steps: ["Reinstall or rotate the app token, then revoke the old one."] },
+  aws: { url: "https://console.aws.amazon.com/iam/home#/security_credentials", steps: ["Deactivate the access key (IAM > Users > Security credentials), create a new one, update the app, then delete the old key.", "Review CloudTrail for activity by the key since it leaked."] }
+};
+var GENERIC = { steps: ["Revoke or rotate the credential in the service that issued it.", "Deploy the replacement wherever the old one was used."] };
+var TAIL = ["Review the provider's audit log for use of the old key since it leaked.", "Remove it from the code; if it is also in git history, the revocation is what protects you."];
+function guideFor(provider) {
+  const g = GUIDES[provider] ?? GENERIC;
+  return { url: g.url, steps: [...g.steps, ...TAIL] };
+}
+
+// server/contain/plan.ts
+var SENS = { low: 1, medium: 2, high: 3, production: 4 };
+function reachOf(f, nodes, edges) {
+  if (f.verify?.access?.length) {
+    const sorted2 = [...f.verify.access].sort((a, b) => SENS[b.sensitivity] - SENS[a.sensitivity]);
+    return { labels: sorted2.map((a) => a.label), rank: SENS[sorted2[0].sensitivity] * 10 + Math.min(sorted2.length, 9) };
+  }
+  if (!f.nodeId) return { labels: [], rank: 0 };
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const resources = blastHops(edges, [f.nodeId]).flatMap((h) => h.nodes).map((id) => byId.get(id)).filter((n) => n?.type === "resource").sort((a, b) => SENS[b.sensitivity ?? "low"] - SENS[a.sensitivity ?? "low"]);
+  return { labels: resources.map((r) => r.label), rank: resources.length ? SENS[resources[0].sensitivity ?? "low"] * 10 + Math.min(resources.length, 9) : 0 };
+}
+function buildPlan(report) {
+  const { findings, nodes, edges } = report;
+  const steps = [];
+  for (const f of findings) {
+    if (f.verify?.status === "revoked" || f.verify?.status === "honey") continue;
+    if (f.rule === "aws-secret-key" && findings.some((k) => k.rule === "aws-access-key" && awsSecretFor(findings, k)?.id === f.id)) continue;
+    const live2 = f.verify?.status === "live";
+    const reach2 = reachOf(f, nodes, edges);
+    const auto2 = live2 && !!REVOKERS[f.provider];
+    const guide = guideFor(f.provider);
+    const reason = auto2 ? void 0 : live2 ? "Confirmed live, but Tripwire cannot revoke this provider's keys for you." : f.verify?.status === "unverified" ? "The provider could not confirm this key. Treat it as live until you have checked." : "Not checked against the provider (scan with key verification to confirm it is live).";
+    steps.push({
+      live: live2,
+      rank: reach2.rank,
+      step: {
+        findingId: f.id,
+        label: f.variable ?? f.ruleLabel,
+        provider: f.provider,
+        file: f.file,
+        line: f.line,
+        reach: reach2.labels,
+        mode: auto2 ? "revoke" : "guided",
+        reason,
+        action: auto2 ? `Revoke through the ${f.provider} API, then check the provider now rejects it.` : "Revoke it yourself using the steps below.",
+        guide
+      }
+    });
+  }
+  const auto = (s) => Number(s.step.mode === "revoke");
+  return steps.sort((a, b) => Number(b.live) - Number(a.live) || b.rank - a.rank || auto(b) - auto(a) || a.step.label.localeCompare(b.step.label)).map((s) => s.step);
+}
+
+// server/contain/index.ts
+var containLog = () => join5(process.env.TRIPWIRE_HOME ?? join5(homedir2(), ".tripwire"), "contain-log.jsonl");
+var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+function record(file, entry) {
+  if (file === false) return;
+  const path = file ?? containLog();
+  try {
+    mkdirSync2(dirname3(path), { recursive: true });
+    appendFileSync(path, JSON.stringify({ at: (/* @__PURE__ */ new Date()).toISOString(), ...entry }) + "\n", { mode: 384 });
+  } catch {
+  }
+}
+async function runContain(input, opts) {
+  const { findings, values } = input;
+  const plan = buildPlan(input).filter((s) => !opts.only || opts.only.includes(s.findingId));
+  const results = [];
+  for (const step of plan) {
+    const finding = findings.find((f) => f.id === step.findingId);
+    if (step.mode === "guided") {
+      results.push({ findingId: step.findingId, status: "guided", note: step.reason ?? "Follow the steps." });
+      continue;
+    }
+    if (!opts.apply) {
+      results.push({ findingId: step.findingId, status: "planned", note: "Dry run: nothing was changed." });
+      continue;
+    }
+    const base = { provider: step.provider, fingerprint: finding.fingerprint, file: step.file };
+    let revoked2;
+    try {
+      revoked2 = await REVOKERS[step.provider]({ finding, findings, values });
+    } catch (err) {
+      revoked2 = { ok: false, note: `Request failed: ${err.message}` };
+    }
+    if (!revoked2.ok) {
+      results.push({ findingId: step.findingId, status: "failed", note: `${revoked2.note} Use the manual steps instead.` });
+      record(opts.logFile, { ...base, outcome: "failed", note: revoked2.note });
+      continue;
+    }
+    await sleep(opts.delayMs ?? 1500);
+    const value = values.get(finding.id) ?? "";
+    const pair = finding.rule === "aws-access-key" ? awsSecretFor(findings, finding) : void 0;
+    const context = new Map(pair ? [["aws-secret", values.get(pair.id) ?? ""]] : []);
+    const after = await verifyOne(finding, value, context).catch(() => void 0);
+    if (after) finding.verify = after;
+    const still = after?.status === "live";
+    const status2 = still ? "still-live" : "revoked";
+    const note = still ? `${revoked2.note} But the provider still accepts the key. Revoke it manually.` : after?.status === "revoked" ? `${revoked2.note} The provider now rejects the key.` : `${revoked2.note} The provider could not be re-checked.`;
+    results.push({ findingId: step.findingId, status: status2, note, reactivate: revoked2.reactivate });
+    record(opts.logFile, { ...base, outcome: status2, note: revoked2.note, reactivate: revoked2.reactivate });
+  }
+  return { plan, results, contained: !results.some((r) => r.status === "failed" || r.status === "still-live") };
+}
+
+// server/cli/contain.ts
+var GLYPH = { planned: "WOULD REVOKE", guided: "YOU DO THIS", revoked: "REVOKED", failed: "FAILED", "still-live": "STILL LIVE" };
+function formatContain(outcome, findings, apply, color) {
+  const c = (code) => (s) => color ? `\x1B[${code}m${s}\x1B[0m` : s;
+  const [red, yellow, green, dim, bold, cyan] = ["31", "33", "32", "2", "1", "36"].map(c);
+  const tone = (s) => ({ planned: yellow, guided: cyan, revoked: green, failed: red, "still-live": red })[s];
+  const byId = new Map(findings.map((f) => [f.id, f]));
+  const out = ["", bold(apply ? "Containment" : "Containment plan (dry run: nothing has been changed)"), ""];
+  if (!outcome.plan.length) out.push(dim("  No live or unconfirmed keys to contain."), "");
+  outcome.plan.forEach((step, i) => {
+    const r = outcome.results.find((x) => x.findingId === step.findingId);
+    const f = byId.get(step.findingId);
+    out.push(`${String(i + 1).padStart(2)}. ${tone(r.status)(GLYPH[r.status].padEnd(12))} ${bold(step.label)}  ${dim(`${step.provider} \xB7 ${step.file}:${step.line}${f?.verify?.identity ? ` \xB7 as ${f.verify.identity}` : ""}`)}`);
+    if (step.reach.length) out.push(dim(`      reaches ${step.reach.slice(0, 4).join(", ")}${step.reach.length > 4 ? ", \u2026" : ""}`));
+    out.push(`      ${r.note}`);
+    if (r.reactivate) out.push(dim(`      undo: ${r.reactivate}`));
+    if (r.status === "guided" || r.status === "failed" || r.status === "still-live") {
+      if (step.guide.url) out.push(`      ${cyan(step.guide.url)}`);
+      step.guide.steps.forEach((s, j) => out.push(dim(`      ${j + 1}) ${s}`)));
+    }
+    out.push("");
+  });
+  const n = (s) => outcome.results.filter((r) => r.status === s).length;
+  if (apply) out.push(`${green(`${n("revoked")} revoked`)} \xB7 ${n("failed") + n("still-live") ? red(`${n("failed") + n("still-live")} need attention`) : "0 need attention"} \xB7 ${cyan(`${n("guided")} manual`)}`, "");
+  else if (n("planned")) out.push(`${n("planned")} key${n("planned") === 1 ? "" : "s"} can be revoked automatically. Run again with ${bold("--apply")} to do it.`, "");
+  return out.join("\n");
+}
+async function contain(target, apply, json2, log, err, quiet) {
+  let values = /* @__PURE__ */ new Map();
+  const report = await scanTarget(target, { vulns: false, verify: true, baseline: false, onValues: (v) => values = v }, (stage) => !quiet && err(`tripwire: ${stage}\u2026
+`));
+  const outcome = await runContain({ findings: report.findings, nodes: report.nodes, edges: report.edges, values }, { apply });
+  if (json2) log(JSON.stringify({ target: report.target, apply, ...outcome }, null, 2) + "\n");
+  else log(formatContain(outcome, report.findings, apply, !!process.stdout.isTTY && !process.env.NO_COLOR));
+  if (!apply) return 0;
+  const byId = new Map(report.findings.map((f) => [f.id, f]));
+  const stillExposed = outcome.results.some((r) => r.status === "failed" || r.status === "still-live" || r.status === "guided" && byId.get(r.findingId)?.verify?.status === "live");
+  return stillExposed ? 1 : 0;
+}
+
+// server/cli/github.ts
+import { appendFileSync as appendFileSync2, readFileSync as readFileSync5 } from "node:fs";
 
 // server/cli/report.ts
 var MARKER = "<!-- tripwire-report -->";
@@ -4265,9 +4471,9 @@ function githubReport(r, v, markdown) {
     const level = blocking.has(f.id) ? "error" : "warning";
     lines.push(`::${level} file=${escProp(f.file)},line=${f.line},title=${escProp(`Tripwire: ${f.ruleLabel}`)}::${esc(`${f.variable ?? f.ruleLabel} looks like a real secret (${f.preview}). Remove it, rotate it with the provider and load it from a secret store.`)}`);
   }
-  if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, markdown);
+  if (process.env.GITHUB_STEP_SUMMARY) appendFileSync2(process.env.GITHUB_STEP_SUMMARY, markdown);
   if (process.env.GITHUB_OUTPUT)
-    appendFileSync(process.env.GITHUB_OUTPUT, `secrets=${r.findings.length}
+    appendFileSync2(process.env.GITHUB_OUTPUT, `secrets=${r.findings.length}
 new-secrets=${r.findings.filter((f) => f.isNew).length}
 vulns=${r.vulns.length}
 failed=${v.failed}
@@ -4299,6 +4505,7 @@ async function upsertPrComment(body) {
 var HELP = `Usage: tripwire scan [path | git url | owner/repo] [options]
        tripwire honey create [--email you@x.com] [--plant owner/repo] [--file path]
        tripwire baseline [path]  accept every current finding in .tripwire-baseline.json
+       tripwire contain [path]   plan how to kill every live key (--apply to revoke them)
        tripwire honey check      (exit 1 if any decoy was used)
 
 Finds secrets in the code and git history, maps what each one unlocks,
@@ -4311,6 +4518,7 @@ Options:
   --no-fail-secrets       Report secrets without failing
   --skip-vulns            Skip the dependency check
   --min-confidence <c>    Only findings at this confidence or above block: low|medium|high (default: low)
+  --apply                 contain: actually revoke live keys (default is a dry-run plan)
   --no-baseline           Ignore .tripwire-baseline.json
   --verify                Ask each provider (read-only) if found keys work and what they reach
   --json <file|->         Write the full report as JSON
@@ -4335,6 +4543,7 @@ async function main(argv, log = (s) => process.stdout.write(s), err = (s) => pro
       verify: { type: "boolean" },
       "min-confidence": { type: "string", default: "low" },
       "no-baseline": { type: "boolean" },
+      apply: { type: "boolean" },
       email: { type: "string" },
       plant: { type: "string" },
       file: { type: "string" },
@@ -4352,6 +4561,7 @@ async function main(argv, log = (s) => process.stdout.write(s), err = (s) => pro
   const minConfidence = values["min-confidence"].toLowerCase();
   if (!(minConfidence in CONFIDENCE_RANK)) return err("--min-confidence must be one of low, medium, high\n"), 2;
   if (cmd === "baseline") return baseline(target, log, err);
+  if (cmd === "contain") return contain(target, !!values.apply, values.json === "-", log, err, !!values.quiet);
   if (cmd !== "scan") return err(`Unknown command "${cmd}".
 
 ${HELP}`), 2;

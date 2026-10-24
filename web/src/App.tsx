@@ -4,7 +4,7 @@ import { AlertFeed } from "./components/AlertFeed";
 import { BlastPanel } from "./components/BlastPanel";
 import { ContainPanel } from "./components/ContainPanel";
 import { ControlBar } from "./components/ControlBar";
-import { FindingsPanel, HoneyPanel, ScanPanel, VulnPanel } from "./components/RealPanels";
+import { ContainRealPanel, FindingsPanel, HoneyPanel, ScanPanel, VulnPanel } from "./components/RealPanels";
 import { Graph } from "./components/Graph";
 import { Timeline } from "./components/Timeline";
 import { useStore } from "./state/store";
@@ -132,6 +132,7 @@ export default function App() {
             <>
               {scan.status !== "idle" && <ScanPanel scan={scan} />}
               {scan.nodes.length > 0 || scan.status === "done" || scan.status === "vulns" ? <FindingsPanel scan={scan} onSelect={showBlast} /> : null}
+              {scan.status === "done" && <ContainRealPanel scan={scan} />}
               <HoneyPanel demo={demo} />
               {scan.status === "done" && <VulnPanel scan={scan} />}
               {demo.incidents.some((i) => i.kind === "honey") && <AlertFeed incidents={demo.incidents.filter((i) => i.kind === "honey")} />}

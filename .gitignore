@@ -5,3 +5,4 @@ runtime/
 /.env
 bench/.cache/
 bench/out/
+.playwright-mcp/

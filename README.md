@@ -64,7 +64,7 @@ Rules live in data, not code. `server/detect/` loads two packs: Tripwire's own r
 
 - **Fast.** One Aho-Corasick pass per file finds every rule keyword at once; regexes only run on lines that contain one.
 - **Fewer false positives.** Per-rule entropy, allowlists (regexes, stopwords, paths), placeholders, UUIDs, digests, password hashes (bcrypt, argon2), version strings, file names, `%s` templates and attribute chains are all rejected. GitHub tokens are checked against their built-in checksum and JWTs must have a real header.
-- **Confidence.** Every finding is `high` (fixed provider format), `medium` or `low` (name-based). Examples in docs and tests, and tutorial passwords like `redis://username:password@...`, report at `low`. `--min-confidence high` fails the check only on `high`; the rest are still listed.
+- **Confidence.** Every finding is `high` (fixed provider format), `medium` or `low` (name-based). Examples in docs and tests, and database URLs whose password is a tutorial default (`password`, `root`, `changeme`), report at `low`. `--min-confidence high` fails the check only on `high`; the rest are still listed.
 - **Hidden secrets.** Values inside base64, URL-encoding and hex (up to two layers) are decoded and rescanned, including Kubernetes `password: <base64>`. Those findings say how they were found. Private keys count only as a full BEGIN..END block, including keys escaped inside a JSON string.
 - **Baseline.** `tripwire baseline` writes `.tripwire-baseline.json`: hashes of the current findings, never the secrets. Those findings stay in the report but stop failing the check; a new secret still fails. `--no-baseline` ignores the file.
 
@@ -77,6 +77,28 @@ npm run bench -- --gate   # exit 1 if Tripwire drops below 95% precision or reca
 ```
 
 [bench/RESULTS.md](bench/RESULTS.md) has the latest numbers. The corpus (`bench/corpus.mts`) is written by this project, so it favours Tripwire's own rules: treat it as a regression gate and a parity check, not an independent ranking. Add a case whenever a real repo produces a miss or a false positive; several of the filters above came from scanning Flask, Django and NodeGoat.
+
+### Containment (`tripwire contain`)
+
+```bash
+npx github:X3PH1RE/tripwire contain .            # dry run: verifies keys, prints the plan, changes nothing
+npx github:X3PH1RE/tripwire contain . --apply    # revokes every live key it can, then re-checks each with its provider
+```
+
+Contain means revoke; it does not issue replacements or update your CI or vault. Keys are ordered by what they reach, highest first. Only keys the provider confirmed live are ever revoked automatically; unverified keys, already-revoked keys and Tripwire's own decoys are never touched.
+
+| Revoked by Tripwire | How |
+| --- | --- |
+| GitHub tokens | GitHub's credential-revocation endpoint |
+| Slack tokens | `auth.revoke` |
+| GitLab personal access tokens | self-revocation (gitlab.com) |
+| AWS access keys | deactivated, not deleted (`UpdateAccessKey`), so it can be switched back on; the undo command is printed and logged. Needs `iam:UpdateAccessKey` on the key's own user. |
+
+Everything else (Stripe, OpenAI, Anthropic, SendGrid, npm, Google, Twilio, databases, SSH keys) gets an ordered runbook with the dashboard link, because those providers have no safe self-service revoke API. If an automatic revoke fails, that key falls back to its runbook and the rest of the plan continues. A key counts as revoked only if the provider rejects it afterwards; one that still works is reported `still-live`. With `--apply` the exit code is `1` while any live key is left standing, including ones that need manual action.
+
+Each action is appended to `~/.tripwire/contain-log.jsonl` (time, provider, fingerprint, outcome, undo command) and never contains a secret. In the UI, scan with **Check if keys are live**, then use the **Containment** panel: each revoke needs a second click to confirm. `POST /api/real/contain {apply, ids?}` does nothing destructive unless `apply` is exactly `true`.
+
+The revoke request shapes follow each provider's documented API and are covered by tests against stubbed responses. They have not been run against live accounts: try a throwaway token first.
 
 ### Honey secrets
 
@@ -95,6 +117,6 @@ The action runs `action/action.mjs`, a self-contained bundle (no install step). 
 
 ## API
 
-`GET /api/state`, `GET /api/events` (SSE), `POST /api/reset`, `GET /api/scan?target=`, `GET /api/blast/:id`, `POST /api/honey/plant`, `POST /api/honey/attack`, `POST /api/breach {provider}`, `POST /api/contain`, `POST /api/cve`, `POST /api/real/scan {target}`, `POST /api/real/fix {keys?}`, `POST /api/real/clear`.
+`GET /api/state`, `GET /api/events` (SSE), `POST /api/reset`, `GET /api/scan?target=`, `GET /api/blast/:id`, `POST /api/honey/plant`, `POST /api/honey/attack`, `POST /api/breach {provider}`, `POST /api/contain`, `POST /api/cve`, `POST /api/real/scan {target}`, `POST /api/real/fix {keys?}`, `POST /api/real/contain {apply, ids?}`, `POST /api/real/clear`.
 
 See [docs/PLAN.md](docs/PLAN.md) for the build plan.

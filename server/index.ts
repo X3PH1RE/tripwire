@@ -7,7 +7,7 @@ import { cleanupInBackground, simulateCve } from "./cve";
 import { blastHops } from "./graph";
 import { PROVIDERS, plantTripwires, simulateAttacker, simulateBreach } from "./incidents";
 import { cannedBlast, generate } from "./llm";
-import { clearScan, createHoney, honeyAction, plantHoney, pollHoney, startFix, startHoneyPolling, startScan } from "./real/index";
+import { clearScan, createHoney, honeyAction, plantHoney, pollHoney, startContain, startFix, startHoneyPolling, startScan } from "./real/index";
 import { contain } from "./rotation";
 import { scanTarget } from "./scanner";
 import { resetState, snapshot, state, subscribe, world } from "./state";
@@ -101,6 +101,13 @@ app.post("/api/real/scan", (req, res) => {
 app.post("/api/real/fix", (req, res) => {
   const keys = Array.isArray(req.body?.keys) ? req.body.keys.map(String) : undefined;
   startFix(keys);
+  res.json({ ok: true });
+});
+
+app.post("/api/real/contain", (req, res) => {
+  // Nothing is revoked unless the caller says so explicitly; anything else is a dry run.
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(String) : undefined;
+  startContain(req.body?.apply === true, ids);
   res.json({ ok: true });
 });
 

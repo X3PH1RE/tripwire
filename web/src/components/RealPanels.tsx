@@ -1,6 +1,6 @@
 import { motion } from "framer-motion";
 import { useState } from "react";
-import type { DemoState, Finding, RealScan, Severity, VulnPackage } from "../../../shared/types";
+import type { ContainResult, ContainStep, DemoState, Finding, RealScan, Severity, VulnPackage } from "../../../shared/types";
 import { post } from "../api";
 import { Panel } from "./ui";
 import { fmt } from "./useNow";
@@ -276,6 +276,98 @@ export function HoneyPanel({ demo }: { demo: DemoState }) {
           </button>
         </div>
       )}
+    </Panel>
+  );
+}
+
+const RESULT_STYLE: Record<ContainResult["status"], string> = {
+  planned: "bg-amber-500/10 text-amber-300 ring-amber-500/25",
+  guided: "bg-sky-500/10 text-sky-300 ring-sky-500/25",
+  revoked: "bg-emerald-500/10 text-emerald-300 ring-emerald-500/25",
+  failed: "bg-rose-500/20 text-rose-200 ring-rose-500/40",
+  "still-live": "bg-rose-500/20 text-rose-200 ring-rose-500/40",
+};
+
+function ContainRow({ step, result, busy, onRevoke }: { step: ContainStep; result?: ContainResult; busy: boolean; onRevoke: (id: string) => void }) {
+  // Revoking is destructive, so the first click only arms the button.
+  const [armed, setArmed] = useState(false);
+  const done = result?.status === "revoked";
+  const open = !done && (step.mode === "guided" || result?.status === "failed" || result?.status === "still-live");
+  return (
+    <div className="rounded-lg border border-line bg-ink-850 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <span className="truncate font-mono text-[13px] font-medium text-zinc-100">{step.label}</span>
+        <span className="flex shrink-0 gap-1">
+          <span className={`${pill} bg-zinc-500/10 text-zinc-300 ring-zinc-500/25`}>{step.provider}</span>
+          {result && result.status !== "planned" ? <span className={`${pill} ${RESULT_STYLE[result.status]}`}>{result.status}</span> : <span className={`${pill} ${step.mode === "revoke" ? RESULT_STYLE.planned : RESULT_STYLE.guided}`}>{step.mode === "revoke" ? "can revoke" : "manual"}</span>}
+        </span>
+      </div>
+      <div className="mt-1 truncate font-mono text-[11px] text-zinc-500">
+        {step.file}:{step.line}
+      </div>
+      {step.reach.length > 0 && <div className="mt-1 text-[11px] text-zinc-400">Reaches {step.reach.slice(0, 3).join(", ")}{step.reach.length > 3 ? ` +${step.reach.length - 3}` : ""}</div>}
+      {result && result.status !== "planned" && <div className="mt-1.5 text-[11px] leading-relaxed text-zinc-400">{result.note}</div>}
+      {result?.reactivate && <div className="mt-1.5 break-all rounded-md bg-ink-950 px-2 py-1 font-mono text-[10px] text-zinc-400">undo: {result.reactivate}</div>}
+      {step.mode === "revoke" && !done && (
+        <button
+          disabled={busy}
+          onClick={() => (armed ? (setArmed(false), onRevoke(step.findingId)) : setArmed(true))}
+          onBlur={() => setArmed(false)}
+          className={`mt-2 h-8 w-full rounded-md text-[12px] font-medium transition disabled:cursor-not-allowed disabled:opacity-40 ${armed ? "bg-rose-500 text-white hover:bg-rose-400" : "bg-zinc-800 text-zinc-100 hover:bg-zinc-700"}`}
+        >
+          {armed ? `Confirm: revoke this ${step.provider} key now` : "Revoke…"}
+        </button>
+      )}
+      {open && (
+        <details className="mt-2 text-[11px] text-zinc-400">
+          <summary className="cursor-pointer text-zinc-300">How to do it yourself</summary>
+          {step.reason && <p className="mt-1.5 text-zinc-500">{step.reason}</p>}
+          {step.guide.url && (
+            <a href={step.guide.url} target="_blank" rel="noreferrer" className="mt-1.5 block truncate text-sky-300 hover:underline">
+              {step.guide.url} ↗
+            </a>
+          )}
+          <ol className="mt-1.5 list-decimal space-y-1 pl-4">
+            {step.guide.steps.map((s) => (
+              <li key={s}>{s}</li>
+            ))}
+          </ol>
+        </details>
+      )}
+    </div>
+  );
+}
+
+export function ContainRealPanel({ scan }: { scan: RealScan }) {
+  const { contain } = scan;
+  const [armedAll, setArmedAll] = useState(false);
+  if (!contain.plan.length) return null;
+  const auto = contain.plan.filter((s) => s.mode === "revoke" && contain.results.find((r) => r.findingId === s.findingId)?.status !== "revoked");
+  const busy = contain.status === "running";
+  const revoke = (ids?: string[]) => post("/real/contain", { apply: true, ids });
+  const revoked = contain.results.filter((r) => r.status === "revoked").length;
+  return (
+    <Panel eyebrow="Containment" accent={auto.length ? "bg-amber-400" : "bg-emerald-400"} title={auto.length ? `${auto.length} live key${auto.length === 1 ? "" : "s"} Tripwire can revoke` : revoked ? `${revoked} key${revoked === 1 ? "" : "s"} revoked` : `${contain.plan.length} key${contain.plan.length === 1 ? "" : "s"} to handle`}>
+      <p className="mt-2 text-[12px] leading-relaxed text-zinc-400">
+        Ordered by what each key can reach. Nothing is revoked until you confirm, and each revocation is checked with the provider afterwards.
+        {!scan.verify && " Run the scan with “Check if keys are live” to find which keys can be revoked automatically."}
+      </p>
+      <div className="mt-3 flex flex-col gap-2">
+        {contain.plan.map((s) => (
+          <ContainRow key={s.findingId} step={s} result={contain.results.find((r) => r.findingId === s.findingId)} busy={busy} onRevoke={(id) => revoke([id])} />
+        ))}
+      </div>
+      {auto.length > 1 && (
+        <button
+          disabled={busy}
+          onClick={() => (armedAll ? (setArmedAll(false), revoke()) : setArmedAll(true))}
+          onBlur={() => setArmedAll(false)}
+          className={`mt-3 h-9 w-full rounded-lg text-[13px] font-medium transition disabled:cursor-not-allowed disabled:opacity-40 ${armedAll ? "bg-rose-500 text-white hover:bg-rose-400" : "bg-zinc-100 text-zinc-900 hover:bg-white"}`}
+        >
+          {busy ? "Revoking…" : armedAll ? `Confirm: revoke all ${auto.length} keys now` : `Revoke all ${auto.length} live keys…`}
+        </button>
+      )}
+      {contain.status === "failed" && <div className="mt-2 rounded-lg border border-rose-500/20 bg-rose-500/5 px-3 py-2 text-[12px] text-rose-200/90">{contain.note}</div>}
     </Panel>
   );
 }
