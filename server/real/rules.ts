@@ -33,7 +33,7 @@ export function matchContent(content: string, path: string | undefined, startLin
 }
 
 export function mask(value: string, rule: Pick<Rule, "id">): string {
-  if (rule.id === "private-key") return "-----BEGIN … PRIVATE KEY-----";
+  if (rule.id.startsWith("private-key")) return "-----BEGIN … PRIVATE KEY-----";
   if (rule.id === "db-url") return value.replace(/:\/\/([^:/@\s]+):[^@\s]+@/, "://$1:••••@").slice(0, 48);
   if (rule.id === "tripwire-demo") return value.length > 22 ? `${value.slice(0, 22)}…` : value;
   const keep = Math.min(6, Math.floor(value.length / 4));

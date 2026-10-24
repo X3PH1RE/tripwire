@@ -3,3 +3,5 @@ dist/
 .env.local
 runtime/
 /.env
+bench/.cache/
+bench/out/

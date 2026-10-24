@@ -23,6 +23,16 @@ export const tripwirePack: Pack = {
     rule({ id: "sendgrid-key", label: "SendGrid API key", provider: "sendgrid", regex: "\\b(SG\\.[A-Za-z0-9_-]{22}\\.[A-Za-z0-9_-]{43})\\b", keywords: ["sg."] }),
     rule({ id: "twilio-key", label: "Twilio API key", provider: "twilio", regex: "\\b(SK[0-9a-f]{32})\\b", keywords: ["sk"] }),
     rule({ id: "npm-token", label: "npm access token", provider: "npm", regex: "\\b(npm_[A-Za-z0-9]{36})\\b", keywords: ["npm_"] }),
+    // Same block as it appears inside a JSON string (GCP service-account files), with literal \n escapes instead of newlines.
+    rule({ id: "private-key-escaped", label: "Private key (escaped in JSON)", provider: "ssh", regex: "-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----[A-Za-z0-9+/=\\\\]{40,}?-----END (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----", keywords: ["private key"] }),
+    rule({ id: "dockerhub-pat", label: "Docker Hub token", provider: "docker", regex: "\\b(dckr_pat_[A-Za-z0-9_-]{27,})\\b", keywords: ["dckr_pat_"] }),
+    rule({ id: "replicate-token", label: "Replicate API token", provider: "replicate", regex: "\\b(r8_[A-Za-z0-9]{37})\\b", keywords: ["r8_"] }),
+    rule({ id: "groq-key", label: "Groq API key", provider: "groq", regex: "\\b(gsk_[A-Za-z0-9]{52})\\b", keywords: ["gsk_"] }),
+    rule({ id: "xai-key", label: "xAI API key", provider: "xai", regex: "\\b(xai-[A-Za-z0-9]{70,})\\b", keywords: ["xai-"] }),
+    rule({ id: "supabase-token", label: "Supabase access token", provider: "supabase", regex: "\\b(sbp_[a-f0-9]{40})\\b", keywords: ["sbp_"] }),
+    rule({ id: "figma-token", label: "Figma access token", provider: "figma", regex: "\\b(figd_[A-Za-z0-9_-]{40})\\b", keywords: ["figd_"] }),
+    rule({ id: "neon-key", label: "Neon API key", provider: "neon", regex: "\\b(napi_[a-z0-9]{64})\\b", keywords: ["napi_"] }),
+    rule({ id: "azure-storage-key", label: "Azure storage account key", provider: "azure", regex: "AccountKey=([A-Za-z0-9+/]{86}==)", keywords: ["accountkey="] }),
     // The password group is what gets checked; the whole URL is what gets reported.
     rule({ id: "db-url", label: "Database URL with password", provider: "database", regex: "\\b((?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\\+srv)?|redis|rediss|amqps?):\\/\\/[^\\s:/@\"']+:([^\\s@\"'/]+)@[^\\s\"']+)", secretGroup: 2, reportGroup: 1, minLength: 6, keywords: ["://"] }),
     rule({ id: "tripwire-demo", label: "Tripwire demo secret", provider: "demo", regex: "\\b(tw_fake_[a-z]+_[a-z0-9]{16,})\\b", keywords: ["tw_fake_"] }),

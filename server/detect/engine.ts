@@ -174,7 +174,7 @@ export class Engine {
     const groupValue = (g: number) => m[g] || undefined;
     const secret = (def.secretGroup ? groupValue(def.secretGroup) : m.slice(1).find((g) => !!g)) ?? m[0];
     if (!secret) return undefined;
-    if (def.id !== "private-key" && !def.multiline && isPlaceholder(secret)) return undefined;
+    if (!def.id.startsWith("private-key") && !def.multiline && isPlaceholder(secret)) return undefined;
     if (def.minLength && secret.length < def.minLength) return undefined;
     if (def.entropy !== undefined && entropy(secret) <= def.entropy) return undefined;
     if (this.global && allowed(this.global, { secret, match: m[0], line, path })) return undefined;
