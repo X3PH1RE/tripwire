@@ -34,7 +34,7 @@ export const tripwirePack: Pack = {
     rule({ id: "neon-key", label: "Neon API key", provider: "neon", regex: "\\b(napi_[a-z0-9]{64})\\b", keywords: ["napi_"] }),
     rule({ id: "azure-storage-key", label: "Azure storage account key", provider: "azure", regex: "AccountKey=([A-Za-z0-9+/]{86}==)", keywords: ["accountkey="] }),
     // The password group is what gets checked; the whole URL is what gets reported.
-    rule({ id: "db-url", label: "Database URL with password", provider: "database", regex: "\\b((?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\\+srv)?|redis|rediss|amqps?):\\/\\/[^\\s:/@\"']+:([^\\s@\"'/]+)@[^\\s\"']+)", secretGroup: 2, reportGroup: 1, minLength: 6, keywords: ["://"] }),
+    rule({ id: "db-url", label: "Database URL with password", provider: "database", regex: "\\b((?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\\+srv)?|redis|rediss|amqps?):\\/\\/[^\\s:/@\"']+:([^\\s@\"'/]+)@[^\\s\"']+)", secretGroup: 2, reportGroup: 1, minLength: 6, check: "db-password", keywords: ["://"] }),
     rule({ id: "tripwire-demo", label: "Tripwire demo secret", provider: "demo", regex: "\\b(tw_fake_[a-z]+_[a-z0-9]{16,})\\b", keywords: ["tw_fake_"] }),
   ],
 };

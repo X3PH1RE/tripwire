@@ -78,6 +78,7 @@ const SPECS: Spec[] = [
   { name: "JWT", token: () => `${b64url({ alg: "HS256", typ: "JWT" })}.${b64url({ sub: "1234567890", name: "svc", iat: 1516239022 })}.${stream(43, WORD)}`, contexts: [{ path: "src/client.js", line: 'const headers = { Authorization: "Bearer {}" };' }, ENV("SERVICE_JWT")] },
   { name: "Generic session secret", token: () => stream(32, ALNUM), contexts: [ENV("SESSION_SECRET"), YAML("api_secret")] },
   { name: "Generic bare password key", token: () => `${stream(20, ALNUM)}7!`, contexts: [{ path: "config/app.yml", line: "password: {}" }] },
+  { name: "Generic hex SECRET_KEY (openssl rand -hex 32)", token: () => stream(64, HEX), contexts: [{ path: "app/config.py", line: "SECRET_KEY = '{}'" }, ENV("FLASK_SECRET_KEY")] },
   { name: "Generic API key assignment", token: () => stream(40, ALNUM), contexts: [{ path: "src/client.py", line: 'API_KEY = "{}"' }, { path: "src/client.js", line: 'const apiKey = "{}";' }] },
 ];
 
@@ -187,6 +188,13 @@ const negatives = (): Case[] => {
     neg("csp-nonce-note", "docs sentence about tokens", "docs/auth.md", "Rotate the API key every 90 days and store each token in the vault."),
     neg("empty-secret", "empty value", ".env", "SECRET_KEY="),
     neg("bool-secret", "boolean flag", "config/app.env", "USE_SECRET_STORE=true"),
+    neg("bcrypt-hash", "bcrypt password hash", "db/seed.js", 'user.password = "$2a$10$8Zo/1e8KM8QzqOKqbDlYlONBOzukWXrM.IiyzqHRYDXqwB3gzDsba";'),
+    neg("argon2-hash", "argon2 password hash", "db/users.sql", "INSERT INTO users (password) VALUES ('$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$RdescudvJCsgt3ub+b+dWRWJTmaaJObG');"),
+    neg("form-body", "form-encoded demo credentials", "docs/tutorial.html", "curl --data 'userName=alex&password=Admin_123&_csrf=' http://localhost:4000/login"),
+    neg("secret-hash-name", "hex digest under a *_HASH name", "config/app.env", `SECRET_HASH=${sha256}`),
+    neg("format-string", "printf-style URL template", "tests/test_templates.py", 'template_url = "%s/custom_templates/project_template.tgz" % self.live_server_url'),
+    neg("source-map", "source map comment", "static/app.min.css", "/*# sourceMappingURL=source_map.css.99914b932bd3.map */"),
+    neg("member-chain", "attribute access under a *_KEY name", "gis/tests.py", "layer_key=AllOGRFields._meta.db_table,"),
     neg("db-url-ref", "database URL built from variables", ".env", "DATABASE_URL=postgres://${DB_USER}:${DB_PASS}@${DB_HOST}/app"),
   ];
 };

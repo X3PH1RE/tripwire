@@ -1,4 +1,4 @@
-import { allowed, compileAllowlist, compileRegex, entropy, isPlaceholder, looksBenign, runCheck, type CompiledAllowlist } from "./filters";
+import { allowed, compileAllowlist, compileRegex, entropy, HASHY_NAME, ILLUSTRATIVE_PATH, isPlaceholder, looksBenign, runCheck, type CompiledAllowlist } from "./filters";
 import type { Confidence, Pack, RuleDef } from "./schema";
 
 export interface CompiledRule {
@@ -30,7 +30,7 @@ const MAX_LINE = 2000;
 const MAX_PER_RULE_PER_LINE = 10;
 
 // A name ending in KEY/TOKEN/..., or one of the unambiguous bare names (`password: ...`, `secret = ...`).
-const ASSIGN = /\b([A-Za-z][A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD|CREDENTIALS?|AUTH|URL|URI|DSN)|PASSWORD|PASSWD|SECRET|TOKEN|CREDENTIALS?)["']?\s*[:=]\s*["']?([^\s"'`,;]+)/i;
+const ASSIGN = /\b([A-Za-z][A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD|CREDENTIALS?|AUTH|URL|URI|DSN)|PASSWORD|PASSWD|SECRET|TOKEN|CREDENTIALS?)["']?\s*[:=]\s*["']?([^\s"'`,;&]+)/i;
 const STRONG_NAME = /SECRET|PASSWORD|PASSWD|PWD|TOKEN|API_?KEY|PRIVATE|CREDENTIAL/i;
 /** Where generic (name-based) matches are noise: lockfiles, vendored code, fixtures and generated output. */
 const GENERIC_SKIP_PATH = /(?:^|\/)(?:__snapshots__|__fixtures__|fixtures?|testdata|test-data|mocks?|node_modules|vendor)\/|\.(?:snap|lock|min\.js|map|svg)$|(?:^|\/)(?:package-lock\.json|yarn\.lock|pnpm-lock\.yaml)$/i;
@@ -47,6 +47,7 @@ function printable(buf: Buffer): string | undefined {
   for (const b of buf) if ((b >= 32 && b < 127) || b === 9 || b === 10 || b === 13) ok++;
   return ok / buf.length >= 0.95 ? buf.toString("utf8") : undefined;
 }
+
 
 const GENERIC_RULE = { id: "generic-assignment", label: "High-entropy secret", provider: "unknown", re: /$^/, confidence: "low" as Confidence };
 
@@ -181,7 +182,7 @@ export class Engine {
     if (rule.allow.some((a) => allowed(a, { secret, match: m[0], line, path }))) return undefined;
     let confidence = rule.confidence;
     if (def.check) {
-      const r = runCheck(def.check, secret);
+      const r = runCheck(def.check, secret, path);
       if (r.reject) return undefined;
       if (r.confidence) confidence = r.confidence;
     }
@@ -196,11 +197,16 @@ export class Engine {
     if (!a) return undefined;
     const value = a[2];
     if (value.length < 16 || value.length > 200) return undefined;
-    if (value.includes("://") || /[\\()[\]{}^]/.test(value) || isPlaceholder(value) || looksBenign(value) || pathLike(value)) return undefined;
+    const strong = STRONG_NAME.test(a[1]) && !HASHY_NAME.test(a[1]);
+    if (value.includes("://") || /[\\()[\]{}^]/.test(value) || isPlaceholder(value) || looksBenign(value, strong) || pathLike(value)) return undefined;
     if (/^[a-z]+(?:[._-][a-z]+)*$/i.test(value)) return undefined;
+    // A hex alphabet has 16 symbols, so random hex tops out near 4.0 bits; judge it on its own scale.
+    const hexOnly = /^[0-9a-f]+$/i.test(value);
     const h = entropy(value);
-    if (h < 3.8) return undefined;
-    return { rule: GENERIC_RULE, value, variable: a[1], line, confidence: STRONG_NAME.test(a[1]) && h >= 4 ? "medium" : "low" };
+    if (h < (hexOnly ? 3.2 : 3.8)) return undefined;
+    // Examples in docs and tests are far more often illustrations than leaks, so they are reported but never rank above low.
+    const illustrative = !!path && ILLUSTRATIVE_PATH.test(path);
+    return { rule: GENERIC_RULE, value, variable: a[1], line, confidence: strong && h >= (hexOnly ? 3.4 : 4) && !illustrative ? "medium" : "low" };
   }
 }
 

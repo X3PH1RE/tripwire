@@ -14,7 +14,7 @@ export interface AllowlistDef {
 }
 
 /** Structure checks that go beyond what a regex can say. */
-export type CheckId = "github-checksum" | "jwt";
+export type CheckId = "github-checksum" | "jwt" | "db-password";
 
 export interface RuleDef {
   id: string;

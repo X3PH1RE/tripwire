@@ -49,9 +49,27 @@ const HEX_HASH = /^(?:[0-9a-f]{32}|[0-9a-f]{40}|[0-9a-f]{56}|[0-9a-f]{64}|[0-9a-
 const VERSIONISH = /^v?\d+(?:\.\d+){1,3}(?:[-+][\w.]+)?$/;
 const SRI_OR_INTEGRITY = /^(?:sha(?:1|256|384|512)[-:])/i;
 
-/** UUIDs, bare hex digests, version strings and SRI hashes: high entropy, but not credentials on their own. */
-export function looksBenign(value: string): boolean {
-  return UUID.test(value) || HEX_HASH.test(value) || VERSIONISH.test(value) || SRI_OR_INTEGRITY.test(value);
+/** printf-style or template placeholders: the value is built at run time. */
+const FORMAT_STRING = /%[sdifr]|%\(\w+\)[sd]|%\{\w+\}/;
+/** `Model._meta.db_table`, `self.config.key`: attribute access, not a literal. */
+const MEMBER_CHAIN = /^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*){2,}$/;
+/** A file name with a known extension (`source_map.css.99914b932bd3.map`, `server.pem`). */
+const FILENAME = /^[\w%./-]+\.(?:map|css|js|mjs|cjs|ts|tsx|jsx|json|ya?ml|xml|html?|txt|md|rst|py|rb|go|java|php|cs|rs|png|jpe?g|gif|svg|ico|webp|woff2?|ttf|tgz|tar|gz|zip|lock|conf|cfg|ini|log|sql|sh|pem|crt|cer|key|pub)$/i;
+
+/** Password hashes in their standard encodings (bcrypt, argon2, crypt(3), PBKDF2, LDAP-style): hashes, not credentials. */
+const PASSWORD_HASH = /^(?:\$2[abxy]?\$\d{2}\$|\$argon2(?:id|i|d)\$|\$[156]\$|\$pbkdf2|\$scrypt\$|\{(?:SHA|SSHA|MD5|SHA256|SHA512|CRYPT|BCRYPT)\}|pbkdf2_sha\d+\$)/i;
+
+/** Names that say the value is a digest or fingerprint, so a hex string there is a hash, not a secret. */
+export const HASHY_NAME = /HASH|DIGEST|CHECKSUM|SHA\d*|MD5|FINGERPRINT|ETAG|SALT|COMMIT|REVISION/i;
+
+/**
+ * UUIDs, version strings, SRI and password hashes are never credentials. A bare hex digest is benign too,
+ * unless the name says it is a secret (`SECRET_KEY = <64 hex>` is what `openssl rand -hex 32` produces).
+ */
+export function looksBenign(value: string, strongName = false): boolean {
+  if (UUID.test(value) || VERSIONISH.test(value) || SRI_OR_INTEGRITY.test(value) || PASSWORD_HASH.test(value)) return true;
+  if (FORMAT_STRING.test(value) || MEMBER_CHAIN.test(value) || FILENAME.test(value)) return true;
+  return HEX_HASH.test(value) && !strongName;
 }
 
 // ---- allowlists ----
@@ -133,15 +151,23 @@ export function jwtOk(token: string): boolean {
   }
 }
 
-/** A failing check either drops the finding (`reject`) or lowers its confidence. */
-export function runCheck(check: CheckId, secret: string): { reject?: boolean; confidence?: Confidence } {
+/** Passwords that are in every tutorial: a URL carrying one is an example, or a throwaway dev database. */
+const WEAK_PASSWORD = /^(?:pass(?:word|wd)?|secret|changeme|change_me|root|admin|test|testing|dev|development|postgres|mysql|mongo|redis|guest|example|demo|default|letmein|qwerty|0*1234\d*|\*+|x+)$/i;
+
+/** A failing check either drops the finding (`reject`) or lowers its confidence. `path` lets a check treat docs and tests as illustrations. */
+export function runCheck(check: CheckId, secret: string, path?: string): { reject?: boolean; confidence?: Confidence } {
   switch (check) {
     case "github-checksum":
       return githubChecksumOk(secret) ? { confidence: "high" } : { confidence: "low" };
     case "jwt":
       return jwtOk(secret) ? {} : { reject: true };
+    case "db-password":
+      return WEAK_PASSWORD.test(secret) || (!!path && ILLUSTRATIVE_PATH.test(path)) ? { confidence: "low" } : {};
   }
 }
+
+/** Docs, examples and tests: places where credentials are far more often illustrations than leaks. */
+export const ILLUSTRATIVE_PATH = /(?:^|\/)(?:docs?|documentation|examples?|samples?|demos?|tests?|__tests__|specs?|e2e)\/|\.(?:md|mdx|rst|adoc|txt)$|(?:^|\/)README/i;
 
 // ---- fingerprints ----
 

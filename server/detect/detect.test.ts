@@ -143,3 +143,32 @@ test("secrets hidden in base64, url-encoding and hex are found and labelled", ()
 
   assert.deepEqual(e.scan(`etag: ${b64(rand(40))}`, "a.yaml").filter((h) => h.via), [], "binary garbage is not scanned");
 });
+
+test("found in real repos: password hashes are not secrets, hex SECRET_KEY is, docs rank lower", () => {
+  const e = defaultEngine();
+  assert.deepEqual(e.scan('"password" : "$2a$10$8Zo/1e8KM8QzqOKqbDlYlONBOzukWXrM.IiyzqHRYDXqwB3gzDsba",', "db-reset.js"), [], "bcrypt");
+  assert.deepEqual(e.scan("password_hash = $argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$RdescudvJCsgt3ub+b+dWRWJTmaaJObG", "a.conf"), [], "argon2");
+  assert.deepEqual(e.scan("curl --data 'userName=a&password=Admin_123&_csrf='", "tutorial.html"), [], "form value stops at &");
+
+  const hex = "192b9bdd22ab9ed4d12e236c78afcb9a393ec15f71bbf5dc987d54727823bcbf";
+  const inCode = e.scan(`SECRET_KEY = '${hex}'`, "app/config.py");
+  assert.equal(inCode.length, 1);
+  assert.equal(inCode[0].confidence, "medium");
+  assert.equal(e.scan(`SECRET_KEY = '${hex}'`, "docs/config.rst")[0].confidence, "low", "documentation example");
+  assert.deepEqual(e.scan(`CHECKSUM_KEY=${hex}`, "a.env"), [], "a digest under a digest-like name");
+  assert.deepEqual(e.scan(`SECRET_HASH=${hex}`, "a.env"), [], "SECRET_HASH is a hash");
+});
+
+test("found in django: format strings, file names and attribute chains are not secrets; tutorial passwords are low confidence", () => {
+  const e = defaultEngine();
+  assert.deepEqual(e.scan('template_url = "%s/custom_templates/project_template.tgz" % self.live_server_url', "tests.py"), []);
+  assert.deepEqual(e.scan("b\"//# sourceMappingURL=source_map.js.99914b932bd3.map\",", "test_storage.py"), []);
+  assert.deepEqual(e.scan("layer_key=AllOGRFields._meta.db_table,", "tests.py"), []);
+
+  const weak = e.scan('"LOCATION": "redis://username:password@127.0.0.1:6379",', "app/settings.py");
+  assert.equal(weak.length, 1, "still reported");
+  assert.equal(weak[0].confidence, "low", "tutorial password");
+  const strong = e.scan(`DATABASE_URL=postgres://app:${rand(20)}@db.internal/app`, "app/settings.py");
+  assert.equal(strong[0].confidence, "high");
+  assert.equal(e.scan(`DATABASE_URL=postgres://app:${rand(20)}@db.internal/app`, "docs/deploy.md")[0].confidence, "low", "same URL inside docs");
+});
