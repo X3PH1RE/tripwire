@@ -95,6 +95,7 @@ export interface DemoState {
     rotations: Rotation[];
   };
   cve: CveState;
+  scan: RealScan;
 }
 
 export interface BlastResult {
@@ -103,4 +104,60 @@ export interface BlastResult {
   explanation: string;
   worstCase: string;
   source: "llm" | "canned";
+}
+
+export interface Finding {
+  id: string;
+  rule: string;
+  ruleLabel: string;
+  provider: string;
+  variable?: string;
+  file: string;
+  line: number;
+  /** Short SHA of the commit that introduced it when it only survives in git history. */
+  commit?: string;
+  inHead: boolean;
+  preview: string;
+  service: string;
+  nodeId: string;
+}
+
+export type Severity = "CRITICAL" | "HIGH" | "MODERATE" | "LOW" | "UNKNOWN";
+
+export interface VulnPackage {
+  key: string;
+  ecosystem: string;
+  name: string;
+  version: string;
+  file: string;
+  direct: boolean;
+  severity: Severity;
+  advisories: { id: string; summary: string; severity: Severity }[];
+  fixed?: string;
+  fixable: boolean;
+}
+
+export interface RealFix {
+  status: "idle" | "running" | "done" | "failed";
+  prUrl?: string;
+  prNumber?: number;
+  packages?: string[];
+  note?: string;
+}
+
+export interface RealScan {
+  status: "idle" | "cloning" | "secrets" | "history" | "vulns" | "done" | "failed";
+  target?: string;
+  repo?: string;
+  branch?: string;
+  startedAt?: number;
+  finishedAt?: number;
+  error?: string;
+  filesScanned: number;
+  commitsScanned: number;
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  findings: Finding[];
+  vulns: VulnPackage[];
+  fix: RealFix;
 }

@@ -1,5 +1,6 @@
 import type { Response } from "express";
 import type { DemoState, GraphNode, Incident } from "../shared/types";
+import { emptyScan } from "./real/empty";
 import { withDanger } from "./scoring";
 import { loadWorld, resetRuntime } from "./world";
 
@@ -14,6 +15,7 @@ function freshState(): DemoState {
     honey: { planted: false, attacks: 0 },
     containment: { status: "idle", total: 0, done: 0, rotations: [] },
     cve: { status: "idle", steps: [] },
+    scan: emptyScan(),
   };
 }
 
@@ -28,7 +30,9 @@ export function currentGeneration(): number {
 export function resetState(): void {
   generation++;
   resetRuntime();
+  const scan = state.scan;
   state = freshState();
+  state.scan = scan;
   boosts = {};
   broadcast();
 }
@@ -50,7 +54,7 @@ export function addIncident(incident: Omit<Incident, "id" | "at">): Incident {
 }
 
 export function snapshot(): DemoState {
-  return { ...state, nodes: withDanger(state.nodes, state.edges, boosts) };
+  return { ...state, nodes: withDanger(state.nodes, state.edges, boosts), scan: { ...state.scan, nodes: withDanger(state.scan.nodes, state.scan.edges, {}) } };
 }
 
 const clients = new Set<Response>();

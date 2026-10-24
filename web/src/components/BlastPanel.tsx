@@ -1,9 +1,9 @@
 import { motion } from "framer-motion";
-import type { BlastResult, DemoState } from "../../../shared/types";
+import type { BlastResult, GraphNode } from "../../../shared/types";
 import { Panel } from "./ui";
 
-export function BlastPanel({ blast, demo, onClose }: { blast: BlastResult; demo: DemoState; onClose: () => void }) {
-  const label = (id: string) => demo.nodes.find((n) => n.id === id)?.label ?? id;
+export function BlastPanel({ blast, nodes, onClose }: { blast: BlastResult; nodes: GraphNode[]; onClose: () => void }) {
+  const label = (id: string) => nodes.find((n) => n.id === id)?.label ?? id;
   return (
     <motion.div initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }}>
       <Panel

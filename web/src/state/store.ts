@@ -4,7 +4,11 @@ import { get } from "../api";
 
 const HOP_MS = 400;
 
+export type Mode = "demo" | "real";
+
 interface Store {
+  mode: Mode;
+  setMode: (mode: Mode) => void;
   demo: DemoState | null;
   connected: boolean;
   selectedId: string | null;
@@ -19,6 +23,11 @@ interface Store {
 let animation = 0;
 
 export const useStore = create<Store>((set) => ({
+  mode: "demo",
+  setMode: (mode) => {
+    animation++;
+    set({ mode, selectedId: null, blast: null, litEdges: new Set(), litNodes: new Set() });
+  },
   demo: null,
   connected: false,
   selectedId: null,

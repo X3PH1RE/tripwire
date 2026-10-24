@@ -1,6 +1,6 @@
 import { Background, BackgroundVariant, MarkerType, ReactFlow, type Edge } from "@xyflow/react";
 import { useMemo } from "react";
-import type { DemoState, GraphNode } from "../../../shared/types";
+import type { GraphEdge, GraphNode } from "../../../shared/types";
 import { HOT_STATUSES } from "../colors";
 import { TripNode, type TripFlowNode } from "./TripNode";
 
@@ -15,30 +15,33 @@ function handlesFor(a: GraphNode, b: GraphNode): [string, string, "default" | "s
 }
 
 interface Props {
-  demo: DemoState;
+  graph: { nodes: GraphNode[]; edges: GraphEdge[] };
+  secured: boolean;
+  /** Changing this remounts the canvas so it re-fits the view to a new graph. */
+  fitKey: string;
   litEdges: Set<string>;
   litNodes: Set<string>;
   selectedId: string | null;
   onSelect: (node: GraphNode) => void;
 }
 
-export function Graph({ demo, litEdges, litNodes, selectedId, onSelect }: Props) {
+export function Graph({ graph, secured, fitKey, litEdges, litNodes, selectedId, onSelect }: Props) {
   const nodes: TripFlowNode[] = useMemo(
     () =>
-      demo.nodes.map((n) => ({
+      graph.nodes.map((n) => ({
         id: n.id,
         type: "trip",
         position: n.position,
-        data: { node: n, lit: litNodes.has(n.id), selected: n.id === selectedId, secured: demo.containment.status === "done" },
+        data: { node: n, lit: litNodes.has(n.id), selected: n.id === selectedId, secured },
         draggable: false,
         selectable: false,
       })),
-    [demo.nodes, demo.containment.status, litNodes, selectedId],
+    [graph.nodes, secured, litNodes, selectedId],
   );
 
   const edges: Edge[] = useMemo(() => {
-    const byId = new Map(demo.nodes.map((n) => [n.id, n]));
-    return demo.edges.map((e) => {
+    const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+    return graph.edges.map((e) => {
       const a = byId.get(e.from)!;
       const b = byId.get(e.to)!;
       const [sourceHandle, targetHandle, type] = handlesFor(a, b);
@@ -63,10 +66,11 @@ export function Graph({ demo, litEdges, litNodes, selectedId, onSelect }: Props)
         labelBgPadding: [4, 2] as [number, number],
       };
     });
-  }, [demo.edges, demo.nodes, litEdges]);
+  }, [graph.edges, graph.nodes, litEdges]);
 
   return (
     <ReactFlow
+      key={fitKey}
       nodes={nodes}
       edges={edges}
       nodeTypes={nodeTypes}

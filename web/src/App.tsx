@@ -4,6 +4,7 @@ import { AlertFeed } from "./components/AlertFeed";
 import { BlastPanel } from "./components/BlastPanel";
 import { ContainPanel } from "./components/ContainPanel";
 import { ControlBar } from "./components/ControlBar";
+import { FindingsPanel, ScanPanel, VulnPanel } from "./components/RealPanels";
 import { Graph } from "./components/Graph";
 import { Timeline } from "./components/Timeline";
 import { useStore } from "./state/store";
@@ -15,11 +16,16 @@ const LEGEND = [
   ["bg-emerald-400", "Secured"],
   ["bg-violet-400", "Honey secret"],
 ];
+const REAL_LEGEND = [
+  ["bg-rose-500", "Exposed secret / reachable resource"],
+  ["bg-amber-400", "history = deleted but still in git"],
+  ["bg-zinc-600", "CI secret reachable through repo access"],
+];
 
-function Legend() {
+function Legend({ items = LEGEND }: { items?: string[][] }) {
   return (
     <div className="pointer-events-none absolute left-5 top-4 z-10 flex items-center gap-4 rounded-lg border border-line bg-ink-900/90 px-3 py-2 text-[11px] text-zinc-400 backdrop-blur">
-      {LEGEND.map(([c, l]) => (
+      {items.map(([c, l]) => (
         <span key={l} className="flex items-center gap-1.5">
           <span className={`h-2 w-2 rounded-sm ${c}`} />
           {l}
@@ -38,10 +44,14 @@ async function until(check: () => boolean, timeoutMs = 30_000) {
 }
 
 export default function App() {
-  const { demo, connected, connect, selectedId, blast, litEdges, litNodes, showBlast, clearBlast } = useStore();
+  const { demo, connected, connect, selectedId, blast, litEdges, litNodes, showBlast, clearBlast, mode, setMode } = useStore();
   const [running, setRunning] = useState(false);
 
   useEffect(() => connect(), [connect]);
+  const scanStarted = demo?.scan.startedAt;
+  useEffect(() => {
+    if (scanStarted) clearBlast();
+  }, [scanStarted, clearBlast]);
 
   const reset = async () => {
     clearBlast();
@@ -49,6 +59,7 @@ export default function App() {
   };
 
   const runDemo = async () => {
+    setMode("demo");
     setRunning(true);
     try {
       await reset();
@@ -74,14 +85,40 @@ export default function App() {
 
   if (!demo) return <div className="flex h-full items-center justify-center text-sm text-zinc-500">Connecting to Tripwire…</div>;
 
+  const real = mode === "real";
+  const scan = demo.scan;
+  const graph = real ? scan : demo;
+  const clearScan = async () => {
+    clearBlast();
+    await post("/real/clear");
+  };
+
   return (
     <div className="flex h-full flex-col">
-      <ControlBar demo={demo} connected={connected} onReset={reset} onRunDemo={runDemo} running={running} />
+      <ControlBar demo={demo} connected={connected} onReset={reset} onRunDemo={runDemo} running={running} mode={mode} setMode={setMode} onClearScan={clearScan} />
       <main className="flex min-h-0 flex-1">
         <div className="relative min-w-0 flex-1">
-          <Legend />
+          {(!real || scan.nodes.length > 0) && <Legend items={real ? REAL_LEGEND : LEGEND} />}
+          {real && !scan.nodes.length && (
+            <div className="absolute inset-0 z-10 flex items-center justify-center p-8">
+              <div className="max-w-md rounded-xl border border-line bg-ink-900/90 p-6 text-center backdrop-blur">
+                <div className="text-[15px] font-semibold text-zinc-100">{scan.status === "idle" ? "Scan a real repository" : scan.status === "failed" ? "Scan failed" : scan.status === "done" ? "No secrets to map" : "Scanning…"}</div>
+                <p className="mt-2 text-[13px] leading-relaxed text-zinc-400">
+                  {scan.status === "idle"
+                    ? "Paste a GitHub URL above. Tripwire finds secrets in the code and its git history, maps what each one unlocks, and checks every dependency for known vulnerabilities."
+                    : scan.status === "failed"
+                      ? scan.error
+                      : scan.status === "done"
+                        ? "No secrets were found, so there is no attack graph. Check the dependency results on the right."
+                        : "Cloning and scanning. Results appear here as soon as the secret scan finishes."}
+                </p>
+              </div>
+            </div>
+          )}
           <Graph
-            demo={demo}
+            graph={graph}
+            secured={!real && demo.containment.status === "done"}
+            fitKey={real ? `real:${scan.target}:${scan.nodes.length}` : "demo"}
             litEdges={litEdges}
             litNodes={litNodes}
             selectedId={selectedId}
@@ -89,10 +126,22 @@ export default function App() {
           />
         </div>
         <aside className="scroll-thin flex w-[420px] shrink-0 flex-col gap-3 overflow-y-auto border-l border-line bg-ink-950 p-4">
-          {blast && <BlastPanel blast={blast} demo={demo} onClose={clearBlast} />}
-          <Timeline cve={demo.cve} />
-          <ContainPanel demo={demo} />
-          <AlertFeed incidents={demo.incidents} />
+          {blast && <BlastPanel blast={blast} nodes={graph.nodes} onClose={clearBlast} />}
+          {real ? (
+            scan.status !== "idle" && (
+              <>
+                <ScanPanel scan={scan} />
+                {scan.nodes.length > 0 || scan.status === "done" || scan.status === "vulns" ? <FindingsPanel scan={scan} onSelect={showBlast} /> : null}
+                {scan.status === "done" && <VulnPanel scan={scan} />}
+              </>
+            )
+          ) : (
+            <>
+              <Timeline cve={demo.cve} />
+              <ContainPanel demo={demo} />
+              <AlertFeed incidents={demo.incidents} />
+            </>
+          )}
         </aside>
       </main>
     </div>

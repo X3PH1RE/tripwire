@@ -7,6 +7,7 @@ import { cleanupInBackground, simulateCve } from "./cve";
 import { blastHops } from "./graph";
 import { PROVIDERS, plantTripwires, simulateAttacker, simulateBreach } from "./incidents";
 import { cannedBlast, generate } from "./llm";
+import { clearScan, startFix, startScan } from "./real/index";
 import { contain } from "./rotation";
 import { scanTarget } from "./scanner";
 import { resetState, snapshot, state, subscribe, world } from "./state";
@@ -64,13 +65,16 @@ app.post("/api/cve", (_req, res) => {
 });
 
 app.get("/api/blast/:id", async (req, res) => {
-  const start = state.nodes.find((n) => n.id === req.params.id);
+  const real = req.params.id.startsWith("r-");
+  const { nodes, edges } = real ? state.scan : state;
+  const notes = real ? {} : world.notes;
+  const start = nodes.find((n) => n.id === req.params.id);
   if (!start) return void res.status(404).json({ error: "unknown node" });
-  const hops = blastHops(state.edges, [start.id]);
-  const canned = cannedBlast(start.id, state.nodes, state.edges, world.notes);
-  const chain = hops.flatMap((h) => h.nodes).map((id) => state.nodes.find((n) => n.id === id)?.label).join(" -> ");
+  const hops = blastHops(edges, [start.id]);
+  const canned = cannedBlast(start.id, nodes, edges, notes);
+  const chain = hops.flatMap((h) => h.nodes).map((id) => nodes.find((n) => n.id === id)?.label).join(" -> ");
   const ai = await generate(
-    `Explain to a developer what an attacker can reach if ${start.label} leaks. Chain: ${start.label} -> ${chain}. Notes: ${JSON.stringify(world.notes)}`,
+    `Explain to a developer what an attacker can reach if ${start.label} leaks. Chain: ${start.label} -> ${chain}. Notes: ${JSON.stringify(notes)}`,
     canned.explanation,
   );
   const result: BlastResult = { nodeId: start.id, hops, explanation: ai.text, worstCase: canned.worstCase, source: ai.source };
@@ -84,6 +88,24 @@ app.get("/api/scan", (req, res) => {
   } catch (err) {
     res.status(400).json({ error: (err as Error).message });
   }
+});
+
+app.post("/api/real/scan", (req, res) => {
+  const target = typeof req.body?.target === "string" ? req.body.target.trim() : "";
+  if (!target) return void res.status(400).json({ error: "target required" });
+  startScan(target);
+  res.json({ ok: true });
+});
+
+app.post("/api/real/fix", (req, res) => {
+  const keys = Array.isArray(req.body?.keys) ? req.body.keys.map(String) : undefined;
+  startFix(keys);
+  res.json({ ok: true });
+});
+
+app.post("/api/real/clear", (_req, res) => {
+  clearScan();
+  res.json({ ok: true });
 });
 
 const port = Number(process.env.PORT ?? 3001);

@@ -27,8 +27,21 @@ npm run dev                  # server :3001, web http://localhost:5173
 
 `demo-world/` is a read-only template; the app only mutates the gitignored `runtime/` copy.
 
+## Scan a real repo
+
+Switch to **Scan a repo**, paste a GitHub URL or `owner/name`, and press **Scan repository**. Tripwire:
+
+1. Shallow-clones the repo (last 300 commits; `SCAN_HISTORY_COMMITS` to change).
+2. Scans every text file for secrets: AWS, GitHub, GitLab, Stripe, Slack, Google, OpenAI, Anthropic, SendGrid, Twilio, npm, private keys, database URLs with passwords, plus high-entropy `*_KEY/TOKEN/SECRET` assignments. Placeholders and `${VAR}` references are ignored.
+3. Scans git history, so secrets that were deleted but are still in old commits show up marked `history`.
+4. Builds the attack graph from the repo: folders with a manifest become services, findings become secrets, key names and token types decide what each secret unlocks, and `${{ secrets.X }}` in workflows are linked through repo write access.
+5. Checks dependencies (`package-lock.json`, `package.json`, `requirements*.txt`, `go.mod`, `composer.lock`, `Gemfile.lock`) against [OSV.dev](https://osv.dev).
+6. **Open fix PR** bumps direct npm and pinned Python dependencies (and same-major npm transitive deps via `overrides`) on a `tripwire/deps-*` branch and opens a PR for review. This needs `GITHUB_TOKEN` with Contents + Pull requests write on that repo.
+
+Secret values are never sent to the browser; the UI only shows masked previews. Nothing is sent to any LLM. Breach, honey-secret and rotation beats are simulations and only exist in **Live demo** mode.
+
 ## API
 
-`GET /api/state`, `GET /api/events` (SSE), `POST /api/reset`, `GET /api/scan?target=`, `GET /api/blast/:id`, `POST /api/honey/plant`, `POST /api/honey/attack`, `POST /api/breach {provider}`, `POST /api/contain`, `POST /api/cve`.
+`GET /api/state`, `GET /api/events` (SSE), `POST /api/reset`, `GET /api/scan?target=`, `GET /api/blast/:id`, `POST /api/honey/plant`, `POST /api/honey/attack`, `POST /api/breach {provider}`, `POST /api/contain`, `POST /api/cve`, `POST /api/real/scan {target}`, `POST /api/real/fix {keys?}`, `POST /api/real/clear`.
 
 See [docs/PLAN.md](docs/PLAN.md) for the build plan.

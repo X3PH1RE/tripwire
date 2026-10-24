@@ -3,7 +3,7 @@ const API = "https://api.github.com";
 export const demoRepo = () => process.env.DEMO_REPO ?? "X3PH1RE/acme-shop-demo";
 export const hasToken = () => !!process.env.GITHUB_TOKEN;
 
-async function gh<T = any>(path: string, init: { method?: string; body?: unknown } = {}): Promise<T> {
+export async function gh<T = any>(path: string, init: { method?: string; body?: unknown } = {}): Promise<T> {
   const res = await fetch(`${API}${path}`, {
     method: init.method ?? "GET",
     headers: {
@@ -54,4 +54,24 @@ export async function cleanupPatchPrs(): Promise<number> {
     await gh(`/repos/${repo}/git/refs/heads/${p.head.ref}`, { method: "DELETE" }).catch(() => undefined);
   }
   return ours.length;
+}
+
+export async function repoInfo(repo: string): Promise<{ default_branch: string; permissions?: { push?: boolean } }> {
+  return gh(`/repos/${repo}`);
+}
+
+export async function getFile(repo: string, path: string, ref: string): Promise<string> {
+  const file = await gh(`/repos/${repo}/contents/${path}?ref=${encodeURIComponent(ref)}`);
+  return Buffer.from(file.content, "base64").toString("utf8");
+}
+
+/** Commits several files on a new branch in one commit and opens a PR against `base`. */
+export async function openMultiFilePr(repo: string, opts: { base: string; branch: string; files: { path: string; content: string }[]; message: string; title: string; body: string }): Promise<{ url: string; number: number }> {
+  const head = await gh(`/repos/${repo}/git/ref/heads/${opts.base}`);
+  const parent = await gh(`/repos/${repo}/git/commits/${head.object.sha}`);
+  const tree = await gh(`/repos/${repo}/git/trees`, { method: "POST", body: { base_tree: parent.tree.sha, tree: opts.files.map((f) => ({ path: f.path, mode: "100644", type: "blob", content: f.content })) } });
+  const commit = await gh(`/repos/${repo}/git/commits`, { method: "POST", body: { message: opts.message, tree: tree.sha, parents: [parent.sha] } });
+  await gh(`/repos/${repo}/git/refs`, { method: "POST", body: { ref: `refs/heads/${opts.branch}`, sha: commit.sha } });
+  const pr = await gh(`/repos/${repo}/pulls`, { method: "POST", body: { title: opts.title, body: opts.body, head: opts.branch, base: opts.base } });
+  return { url: pr.html_url, number: pr.number };
 }

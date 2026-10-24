@@ -69,7 +69,9 @@ export function TripNode({ data }: NodeProps<TripFlowNode>) {
             {n.status === "rotated" ? "rotated" : `risk ${n.danger}`}
           </motion.span>
         )}
-        {n.badge && <span className="rounded-md bg-emerald-500/10 px-1.5 py-0.5 font-mono text-[11px] text-emerald-300 ring-1 ring-inset ring-emerald-500/25">{n.badge}</span>}
+        {n.badge && (
+          <span className={`rounded-md px-1.5 py-0.5 font-mono text-[11px] ring-1 ring-inset ${n.badge === "history" ? "bg-amber-500/10 text-amber-300 ring-amber-500/25" : "bg-emerald-500/10 text-emerald-300 ring-emerald-500/25"}`}>{n.badge}</span>
+        )}
       </div>
       <div className={`flex items-center gap-1.5 truncate font-semibold tracking-tight text-zinc-50 ${n.type === "decoy" ? "text-[13px]" : "mt-1 text-[14px]"}`}>
         {n.type === "decoy" && <span className="text-violet-300"><Icon type="decoy" /></span>}
