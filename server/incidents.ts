@@ -9,10 +9,10 @@ const randomToken = (n = 32) => Array.from({ length: n }, () => "abcdefghijklmno
 export const fakeValue = (provider: string) => `tw_fake_${provider}_${randomToken()}`;
 
 const DECOYS = [
-  { id: "dec-api", label: "BACKUP_DB_PASSWORD", file: "api/.env", service: "svc-api", position: { x: 240, y: 320 } },
-  { id: "dec-web", label: "ADMIN_API_TOKEN", file: "web/.env", service: "svc-web", position: { x: 240, y: 120 } },
-  { id: "dec-worker", label: "PAYOUTS_SECRET", file: "worker/.env", service: "svc-worker", position: { x: 240, y: 520 } },
-  { id: "dec-ci", label: "PROD_SSH_KEY", file: ".github/workflows/deploy.yml", service: "svc-ci", position: { x: 240, y: 680 } },
+  { id: "dec-api", label: "BACKUP_DB_PASSWORD", file: "api/.env", service: "svc-api", position: { x: 270, y: 328 } },
+  { id: "dec-web", label: "ADMIN_API_TOKEN", file: "web/.env", service: "svc-web", position: { x: 270, y: 128 } },
+  { id: "dec-worker", label: "PAYOUTS_SECRET", file: "worker/.env", service: "svc-worker", position: { x: 270, y: 528 } },
+  { id: "dec-ci", label: "PROD_SSH_KEY", file: ".github/workflows/deploy.yml", service: "svc-ci", position: { x: 270, y: 688 } },
 ];
 
 const ATTACKERS = [

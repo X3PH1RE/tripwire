@@ -1,4 +1,4 @@
-import { Background, MarkerType, ReactFlow, type Edge } from "@xyflow/react";
+import { Background, BackgroundVariant, MarkerType, ReactFlow, type Edge } from "@xyflow/react";
 import { useMemo } from "react";
 import type { DemoState, GraphNode } from "../../../shared/types";
 import { HOT_STATUSES } from "../colors";
@@ -45,7 +45,7 @@ export function Graph({ demo, litEdges, litNodes, selectedId, onSelect }: Props)
       const lit = litEdges.has(e.id);
       const hot = HOT_STATUSES.includes(a.status) && HOT_STATUSES.includes(b.status);
       const green = !lit && !hot && (a.status === "rotated" || a.status === "patched") && (b.status === "rotated" || b.status === "patched");
-      const color = lit ? "#fb923c" : hot ? "#ef4444" : green ? "#10b981" : e.kind === "unlocks" ? "#64748b" : "#475569";
+      const color = lit ? "#fbbf24" : hot ? "#f43f5e" : green ? "#34d399" : e.kind === "unlocks" ? "#52525b" : "#3f3f46";
       return {
         id: e.id,
         source: e.from,
@@ -55,11 +55,12 @@ export function Graph({ demo, litEdges, litNodes, selectedId, onSelect }: Props)
         type,
         animated: lit || hot,
         className: lit ? "edge-lit" : hot ? "edge-hot" : "",
-        style: { stroke: color, strokeWidth: lit ? 5 : hot ? 3.5 : 2, strokeDasharray: e.kind === "stored_in" && !lit && !hot ? "6 5" : undefined },
-        markerEnd: { type: MarkerType.ArrowClosed, color, width: 18, height: 18 },
+        style: { stroke: color, strokeWidth: lit ? 2.5 : hot ? 2 : 1.25, strokeDasharray: e.kind === "stored_in" && !lit && !hot ? "4 4" : undefined },
+        markerEnd: { type: MarkerType.ArrowClosed, color, width: 14, height: 14 },
         label: e.kind === "unlocks" ? "unlocks" : undefined,
-        labelStyle: { fill: "#94a3b8", fontSize: 11 },
-        labelBgStyle: { fill: "#020617" },
+        labelStyle: { fill: "#71717a", fontSize: 10, fontFamily: "JetBrains Mono" },
+        labelBgStyle: { fill: "#0a0a0c" },
+        labelBgPadding: [4, 2] as [number, number],
       };
     });
   }, [demo.edges, demo.nodes, litEdges]);
@@ -78,10 +79,10 @@ export function Graph({ demo, litEdges, litNodes, selectedId, onSelect }: Props)
       zoomOnDoubleClick={false}
       proOptions={{ hideAttribution: true }}
       colorMode="dark"
-      style={{ background: "#020617" }}
+      style={{ background: "transparent" }}
       onNodeClick={(_, n) => onSelect((n as TripFlowNode).data.node)}
     >
-      <Background color="#1e293b" gap={24} />
+      <Background variant={BackgroundVariant.Dots} color="#27272a" gap={22} size={1.2} />
     </ReactFlow>
   );
 }

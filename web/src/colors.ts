@@ -1,28 +1,45 @@
 import type { GraphNode } from "../../shared/types";
 
 export function dangerColor(danger: number): string {
-  if (danger >= 70) return "bg-red-500 text-white";
-  if (danger >= 40) return "bg-amber-400 text-slate-950";
-  return "bg-emerald-500 text-slate-950";
+  if (danger >= 70) return "bg-rose-500/15 text-rose-300 ring-rose-500/30";
+  if (danger >= 40) return "bg-amber-500/15 text-amber-300 ring-amber-500/30";
+  return "bg-emerald-500/10 text-emerald-300 ring-emerald-500/25";
+}
+
+/** Accent colour of the status stripe on the left edge of each node. */
+export function stripe(n: GraphNode, secured = false): string {
+  if (n.type === "decoy") return n.status === "attacked" ? "bg-violet-400" : "bg-violet-500/60";
+  switch (n.status) {
+    case "exposed":
+    case "attacked":
+      return "bg-rose-500";
+    case "rotating":
+      return "bg-amber-400 animate-pulse";
+    case "rotated":
+    case "patched":
+      return "bg-emerald-400";
+    default:
+      return secured ? "bg-emerald-500/50" : "bg-zinc-600";
+  }
 }
 
 export function statusClasses(n: GraphNode, secured = false): string {
   if (n.type === "decoy")
     return n.status === "attacked"
-      ? "bg-fuchsia-900 border-fuchsia-300 border-dashed shadow-[0_0_28px_rgba(217,70,239,0.8)]"
-      : "bg-fuchsia-950/60 border-fuchsia-400 border-dashed";
+      ? "bg-violet-950/60 border-violet-400/70 border-dashed shadow-[0_0_0_4px_rgba(139,92,246,0.15)]"
+      : "bg-ink-900 border-violet-500/40 border-dashed";
   switch (n.status) {
     case "exposed":
-      return "bg-red-900 border-red-400 shadow-[0_0_28px_rgba(239,68,68,0.75)]";
+      return "bg-rose-950/50 border-rose-500/70 shadow-[0_0_0_4px_rgba(244,63,94,0.14)]";
     case "attacked":
-      return "bg-red-950 border-red-500 shadow-[0_0_18px_rgba(239,68,68,0.55)]";
+      return "bg-rose-950/30 border-rose-500/45";
     case "rotating":
-      return "bg-amber-900 border-amber-300 animate-pulse";
+      return "bg-amber-950/30 border-amber-400/60";
     case "rotated":
     case "patched":
-      return "bg-emerald-900 border-emerald-400 shadow-[0_0_14px_rgba(16,185,129,0.45)]";
+      return "bg-emerald-950/30 border-emerald-500/50";
     default:
-      return secured ? "bg-slate-800 border-emerald-500" : "bg-slate-800 border-slate-600";
+      return secured ? "bg-ink-900 border-emerald-500/25" : "bg-ink-900 border-line-strong";
   }
 }
 

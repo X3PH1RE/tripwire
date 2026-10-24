@@ -1,5 +1,16 @@
 @import "tailwindcss";
 
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+  --color-ink-950: #0a0a0c;
+  --color-ink-900: #111114;
+  --color-ink-850: #16161a;
+  --color-ink-800: #1c1c21;
+  --color-line: rgba(255, 255, 255, 0.08);
+  --color-line-strong: rgba(255, 255, 255, 0.14);
+}
+
 html,
 body,
 #root {
@@ -7,22 +18,33 @@ body,
 }
 
 body {
-  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
-  color: #e2e8f0;
+  background: var(--color-ink-950);
+  color: #e4e4e7;
+  font-family: var(--font-sans);
+  font-feature-settings: "cv11", "ss01";
+  -webkit-font-smoothing: antialiased;
 }
 
 .react-flow__edge-path {
-  transition: stroke 300ms ease, stroke-width 300ms ease;
+  transition: stroke 400ms ease, stroke-width 400ms ease;
+}
+
+.react-flow__edge-textbg {
+  rx: 4;
 }
 
 .edge-lit .react-flow__edge-path {
-  filter: drop-shadow(0 0 6px #fb923c);
-}
-
-.edge-hot .react-flow__edge-path {
-  filter: drop-shadow(0 0 4px #ef4444);
+  filter: drop-shadow(0 0 4px rgba(251, 191, 36, 0.6));
 }
 
 .tw-node {
-  transition: background-color 500ms ease, border-color 500ms ease, box-shadow 500ms ease;
+  transition: border-color 500ms ease, box-shadow 500ms ease, background-color 500ms ease;
+}
+
+.scroll-thin::-webkit-scrollbar {
+  width: 6px;
+}
+.scroll-thin::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
 }
