@@ -1,3 +1,7 @@
 # Fake credentials used by the demo world and tests.
 demo-world/
 *.test.ts
+# Bundled output embeds the imported rule allowlists, which list published example keys.
+action/
+bench/RESULTS.md
+server/detect/rules/gitleaks.json
