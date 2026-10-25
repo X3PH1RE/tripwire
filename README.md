@@ -2,6 +2,28 @@
   <img src="assets/banner.svg" alt="Tripwire: find the leaked key, see what it unlocks, kill it" width="100%" />
 </p>
 
+## Why this exists
+
+Attackers keep going after secrets: API keys, tokens, database passwords. The last few days made it concrete (as of October 25, 2026; some of these are still developing, so follow the links rather than this summary):
+
+- **Railway, October 21.** The cloud platform said an attacker "may have accessed encrypted environment variables and, for some of them, obtained the decrypted contents." Railway urged all users to revoke and rotate their keys, said the impact is limited to a subset of users, and had not disclosed the cause or how many were affected. ([TechCrunch](https://techcrunch.com/2026/10/22/developer-platform-railway-urges-all-users-to-revoke-secret-keys-after-cyberattack/), [GitGuardian](https://blog.gitguardian.com/railway-october-2026-incident-environment-variables/))
+- **PHP, October 20 to 21.** Two critical flaws, CVE-2026-109618 and CVE-2026-109619 (CVSS v4.0 9.2, unauthenticated remote code execution), leaked before the patch and were fixed a day early in PHP 8.5.12, 8.4.27, 8.3.36 and 8.2.35. Wiz showed a separate memory-disclosure path that, per [Huntress](https://www.huntress.com/blog/php2shell-leaked-critical-php-vulnerabilities), "could expose passwords, tokens, API keys, and certificates". Huntress had not seen exploitation on its own systems when it wrote that. ([PHP advisory](https://www.php.net/))
+- **LiteLLM, October 21.** A malicious version 1.107.0 was published to PyPI and Docker. It is an infostealer aimed at cloud credentials, LLM provider API keys, SSH and GPG keys. The same package had an earlier compromise in March. ([The Register](https://www.theregister.com/security/2026/10/21/litellm-supply-chain-attack-hoovers-up-passwords-and-secrets/5304548))
+- **Vercel, April.** An attacker who compromised a third-party AI tool (Context.ai) reached a Vercel employee's account and decrypted the non-sensitive environment variables of a limited subset of customers; Vercel said such values "should be treated as potentially exposed and rotated as a priority". ([Vercel's bulletin](https://examples.vercel.com/kb/bulletin/vercel-april-2026-security-incident))
+- **The background rate.** GitGuardian counted 29 million new hardcoded secrets in public GitHub commits in 2025, a 34% rise, and found 64% of secrets confirmed valid in 2022 still exploitable four years later. ([The Hacker News](https://thehackernews.com/2026/03/the-state-of-secrets-sprawl-2026-9.html))
+
+What these have in common is the day after. Whether the cause is a platform breach, a language runtime bug or a poisoned package, the questions are the same: **which secrets did we have, which of them still work, what does each one unlock, and how fast can we kill them?** Most teams answer from memory, and rotate in whatever order they remember.
+
+Tripwire is built for that day, and for the commit before it:
+
+- **Find** every secret in the code and in git history, including ones deleted long ago but never rotated.
+- **Check** which are live, by asking each provider, instead of assuming.
+- **Show** what each one reaches, so rotation goes highest blast radius first.
+- **Revoke** what can be revoked by API (GitHub, Slack, GitLab, AWS) and give ordered runbooks for the rest, as a dry run until you confirm.
+- **Stop** the next one earlier, with a pre-commit hook and a pull-request check that a pull request cannot switch off.
+
+What it does not do, so you are not misled: Tripwire scans repositories. It cannot see secrets that live only inside a platform's dashboard (Railway, Vercel), it does not prevent a platform breach, and it does not detect an outdated PHP runtime. In an incident like Railway's it helps you find and rotate the credentials that also exist in your code and history, and it gives you the method to work through the rest. Its revocation calls are tested against stubbed responses, not live accounts, and on provider breadth it is level with Gitleaks and well short of TruffleHog (see [Benchmark](#benchmark)).
+
 A repo security agent with a visual attack graph. It scans a repo for secrets, maps their blast radius, plants honey secrets as tripwires, contains a breach by rotating keys highest-danger first, and responds to new CVEs by opening a real patch PR.
 
 All credentials in the demo world are fake (`tw_fake_<provider>_<random>`).
