@@ -181,7 +181,9 @@ async function terminalShots(browser: Browser) {
   const work = mkdtempSync(join(tmpdir(), "tw-demo-"));
   const repo = join(work, TARGET.split("/").pop()!);
   const page = await (await browser.newContext({ viewport: { width: 1180, height: 900 }, deviceScaleFactor: 2 })).newPage();
+  const scenes: Record<string, Scene> = {};
   const shot = async (name: string, title: string, blocks: { cmd: string; out: string }[]) => {
+    scenes[name] = { title, blocks };
     await page.setContent(terminalHtml(blocks, title));
     await page.locator("#term").screenshot({ path: join(SHOTS, `${name}.png`), type: "png" });
     console.log(`  ${name}.png`);
@@ -224,6 +226,9 @@ async function terminalShots(browser: Browser) {
 
     const bench = run(process.execPath, [join(root, "node_modules", "tsx", "dist", "cli.mjs"), join(root, "bench", "run.mts")], root, { FORCE_COLOR: "0" });
     await shot("cli-6-benchmark", "tripwire", [{ cmd: "npm run bench", out: bench.split("\n").slice(0, 9).join("\n") }]);
+
+    // The same real output, animated: scan, plan containment, then a commit the hook refuses.
+    await cliGif(browser, [scenes["cli-2-scan"], scenes["cli-3-contain-dry-run"], scenes["cli-5-pre-commit"]], join(OUT, "tripwire-cli.gif"));
   } finally {
     await page.context().close();
     rmSync(work, { recursive: true, force: true });
@@ -259,18 +264,72 @@ function shrink(png: InstanceType<typeof PNG>, width: number) {
   return { data, width, height };
 }
 
-function writeGif(path: string) {
-  const step = Math.max(1, Math.ceil(frames.length / MAX_GIF_FRAMES));
-  const picked = frames.filter((_, i) => i % step === 0);
+interface Shot {
+  png: Buffer;
+  /** Milliseconds this frame stays on screen. */
+  delay: number;
+}
+
+function encodeGif(shots: Shot[], path: string, width: number) {
   const gif = GIFEncoder();
-  for (const f of picked) {
-    const img = shrink(PNG.sync.read(f), GIF_WIDTH);
+  for (const s of shots) {
+    const img = shrink(PNG.sync.read(s.png), width);
     const palette = quantize(img.data, 256);
-    gif.writeFrame(applyPalette(img.data, palette), img.width, img.height, { palette, delay: 850 });
+    gif.writeFrame(applyPalette(img.data, palette), img.width, img.height, { palette, delay: s.delay });
   }
   gif.finish();
   writeFileSync(path, gif.bytes());
-  console.log(`  tripwire-demo.gif (${picked.length} frames)`);
+  console.log(`  ${path.split(/[\\/]/).pop()} (${shots.length} frames, ${(gif.bytes().length / 1e6).toFixed(1)} MB)`);
+}
+
+function writeGif(path: string) {
+  const step = Math.max(1, Math.ceil(frames.length / MAX_GIF_FRAMES));
+  encodeGif(
+    frames.filter((_, i) => i % step === 0).map((png) => ({ png, delay: 850 })),
+    path,
+    GIF_WIDTH,
+  );
+}
+
+// ---------------------------------------------------------------- animated terminal GIF
+
+interface Scene {
+  title: string;
+  blocks: { cmd: string; out: string }[];
+}
+
+/** Types each command, then reveals its real output in chunks, one scene after another, at a fixed frame size. */
+async function cliGif(browser: Browser, scenes: Scene[], path: string) {
+  const page = await (await browser.newContext({ viewport: { width: 1180, height: 1400 }, deviceScaleFactor: 1 })).newPage();
+  try {
+    // One fixed height for every frame (a GIF cannot change size): the tallest finished scene.
+    let height = 0;
+    for (const s of scenes) {
+      await page.setContent(terminalHtml(s.blocks, s.title));
+      height = Math.max(height, Math.ceil((await page.locator("#term").boundingBox())!.height));
+    }
+    const shots: Shot[] = [];
+    const frame = async (title: string, blocks: Scene["blocks"], delay: number) => {
+      await page.setContent(terminalHtml(blocks, title).replace('id="term" style="', `id="term" style="min-height:${height}px;`));
+      shots.push({ png: await page.locator("#term").screenshot({ type: "png" }), delay });
+    };
+    for (const s of scenes) {
+      for (let i = 0; i < s.blocks.length; i++) {
+        const done = s.blocks.slice(0, i);
+        const { cmd, out } = s.blocks[i];
+        for (const frac of [0.3, 0.65, 1]) await frame(s.title, [...done, { cmd: `${cmd.slice(0, Math.ceil(cmd.length * frac))}█`, out: "" }], frac === 1 ? 450 : 140);
+        const lines = out.trimEnd().split("\n");
+        const chunks = Math.min(7, lines.length);
+        for (let c = 1; c <= chunks; c++) {
+          const last = c === chunks;
+          await frame(s.title, [...done, { cmd, out: lines.slice(0, Math.ceil((lines.length * c) / chunks)).join("\n") }], last ? (i === s.blocks.length - 1 ? 2600 : 900) : 160);
+        }
+      }
+    }
+    encodeGif(shots, path, 900);
+  } finally {
+    await page.context().close();
+  }
 }
 
 // ---------------------------------------------------------------- main

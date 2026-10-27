@@ -74,7 +74,9 @@ The **Live demo** tab plays a breach against a fake company (`acme-shop`, all cr
 
 ### Command line
 
-Rendered from the real output of the commands shown, on the same repository.
+Rendered from the real output of the commands shown, on the same repository. First the animated version (scan, a containment plan, then a commit the pre-commit hook refuses), then each command on its own.
+
+![Tripwire command line](https://raw.githubusercontent.com/X3PH1RE/tripwire/main/docs/demo/tripwire-cli.gif)
 
 | | |
 | --- | --- |
