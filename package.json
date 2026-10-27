@@ -1,6 +1,6 @@
 {
   "name": "tripwire-scan",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Finds leaked secrets in code, git history and commits, maps what each unlocks, checks which are live, and revokes them. CLI, pre-commit hook and GitHub Action.",
   "license": "MIT",
   "author": "Ashwin Menon",
