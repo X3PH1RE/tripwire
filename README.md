@@ -220,5 +220,3 @@ The action runs `action/action.mjs`, a self-contained bundle (no install step). 
 ## API
 
 `GET /api/state`, `GET /api/events` (SSE), `POST /api/reset`, `GET /api/scan?target=`, `GET /api/blast/:id`, `POST /api/honey/plant`, `POST /api/honey/attack`, `POST /api/breach {provider}`, `POST /api/contain`, `POST /api/cve`, `POST /api/real/scan {target}`, `POST /api/real/fix {keys?}`, `POST /api/real/contain {apply, ids?}`, `POST /api/real/clear`.
-
-See [docs/PLAN.md](docs/PLAN.md) for the build plan.
