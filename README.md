@@ -43,7 +43,7 @@ Recorded end to end on a real public repository, [OWASP/NodeGoat](https://github
 
 ![Tripwire tour](https://raw.githubusercontent.com/X3PH1RE/tripwire/main/docs/demo/tripwire-demo.gif)
 
-[Download the full-length video (WebM, 25 MB)](https://github.com/X3PH1RE/tripwire/releases/download/v1.0.1/tripwire-tour.webm)
+[Download the full-length video (WebM, 14 MB)](https://github.com/X3PH1RE/tripwire/releases/download/v1.0.3/tripwire-tour.webm)
 
 ### Scan a real repository
 
