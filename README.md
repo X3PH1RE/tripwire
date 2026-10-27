@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/banner.svg" alt="Tripwire: find the leaked key, see what it unlocks, kill it" width="100%" />
+  <img src="assets/banner.png" alt="Tripwire: find the leaked key, see what it unlocks, kill it" width="100%" />
 </p>
 
 ## Why this exists
